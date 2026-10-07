@@ -1,0 +1,30 @@
+[project]
+name = "fredtux-2.0"
+version = "0.5.0"
+description = "Modular local agent harness"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+fredtux = "fredtux.interfaces.cli:main"
+fredtux-api = "fredtux.interfaces.api:main"
+
+# Setuptools wertet in der Flat-Layout-Erkennung jedes Top-Level-Verzeichnis als
+# potenzielles Paket - auch das maschinenlokale `bugs/`. Oh diese Angabe schlägt
+# `pip install -e .` mit "Multiple top-level packages discovered" fehl.
+[tool.setuptools]
+packages = ["fredtux", "fredtux.interfaces", "fredtux.tools"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

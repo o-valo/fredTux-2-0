@@ -1,0 +1,38 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg-info/*
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+.fredtux-2.0/
+.env
+
+# config.nd wird bewusst versioniert: Es enthält nur Beispielwerte auf
+# 127.0.0.1, keine Geheimnisse. Wer hier echte Zugangsdaten einträgt,
+# muss sie vorher entfernen - FREDTUX_API_KEY gehört in .env oder einen
+# Secret Store, niemals in diese Datei.
+
+# Interne Notizen: nie veröffentlichen, auch wenn sie lokal herumliegen.
+bug.txt
+fehlende_tools.md
+konzept.md
+
+# Tagesschau-Feed-Artefakte. Das Werkzeug scripts/tagesschau_feed.sh bleibt
+# versioniert, die geladenen Inhalte nicht. Nur mit --output geschrieben.
+tagesschau*.xml
+tagesschau*.rss
+.tagesschau.xml
+
+# Leere Dateien "1" aus einem fehlgeleiteten Shell-Upload. Sie sind bereits
+# im Repository, deshalb entfernt diese Regel sie nur nicht mehr.
+docs/1
+scripts/1
+
+# Lokale Datei-Backups (z. B. README.md.bak-*). Enthalten den Originalstand
+# vor Bearbeitungen und werden nie mitgepusht.
+backups/

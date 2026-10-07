@@ -1,0 +1,15 @@
+# FredTux 2.0 – Shell-Sicherheitsstufen
+# allowlist: nur einzelne Kommandos aus FREDTUX_SHELL_ALLOWED_COMMANDS
+# standard: Standardbefehle + Lese-/Schreibwerkzeuge im Schreibbereich
+# yolo: beliebige Bash-Kommandos; nur bewusst aktivieren!
+# coding: Entwicklungswerkzeuge und Pipes/Redirection, aber kein beliebiges bash -c
+FREDTUX_SHELL_MODE=coding
+FREDTUX_SHELL_ROOT=.
+FREDTUX_SHELL_WRITE_ROOT=.
+# Zusätzliche freigegebene Pfade für Coding-Lese-/Zielpfade (z. B. Backup-Ziel),
+# Komma-getrennt. Schreiben bleibt weiterhin auf FREDTUX_SHELL_WRITE_ROOT beschränkt.
+FREDTUX_SHELL_EXTRA_ROOTS=~/BACKUP
+FREDTUX_SHELL_WRITE=1
+FREDTUX_SHELL_TIMEOUT=30
+FREDTUX_CODING_TIMEOUT=300
+FREDTUX_SHELL_ALLOWED_COMMANDS=pwd, ls, cd, grep, ping, lynx, top, ssh, screen
