@@ -1,0 +1,37 @@
+name: Bug report / Fehlerbericht
+description: Fehler oder unerwartetes Verhalten melden / Report a bug or unexpected behaviour
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antworte in deiner bevorzugten Sprache. / Answer in your preferred language.
+  - type: textarea
+    id: description
+    attributes:
+      label: Was ist passiert? / What happened?
+      description: Bitte Fehlerbild und erwartetes Verhalten beschreiben. / Please describe the error and the expected behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduktion / Reproduction
+      description: Ausgangslage, Befehle und erwartetes Ergebnis. / Initial state, commands, and expected result.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Python- und FredTux-Version / Python and FredTux version
+      placeholder: Python 3.12, FredTux 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Fehlermeldung / Error message
+      description: Bitte API-Keys, Tokens und private Chat-Inhalte entfernen. / Please remove API keys, tokens, and private chat content.
+    validations:
+      required: false

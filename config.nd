@@ -1,0 +1,18 @@
+# FredTux 2.0 – lokale Beispielkonfiguration
+# Für eine andere Umgebung bitte die Werte anpassen.
+#
+# Shell-Sicherheitsstufen (FREDTUX_SHELL_*, FREDTUX_CODING_TIMEOUT) stehen in shell.nd,
+# Geheimnisse in .env. Beides wird hier bewusst nicht wiederholt.
+
+FREDTUX_BASE_URL=http://127.0.0.1:11434/v1
+FREDTUX_OLLAMA_URL=http://127.0.0.1:11434
+FREDTUX_MODEL=gemma4:latest
+FREDTUX_SKIP_OLLAMA_CHECK=0
+FREDTUX_API_HOST=127.0.0.1
+FREDTUX_API_PORT=8765
+FREDTUX_API_MODEL=fredtux-2-0
+FREDTUX_TIMEOUT=120
+# Werkzeugschleifen: idle = Runden ohne erfolgreichen Werkzeugaufruf,
+# total = harte Obergrenze aller Runden (Sicherheitsnetz gegen Endlosschleifen).
+FREDTUX_MAX_IDLE_ROUNDS=6
+FREDTUX_MAX_TOTAL_ROUNDS=40

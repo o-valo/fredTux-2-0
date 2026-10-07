@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Create virtual environment
+        run: python -m venv .venv
+      - name: Install project
+        run: .venv/bin/python -m pip install --no-deps --editable .
+      - name: Compile
+        run: .venv/bin/python -m compileall -q .
+      - name: Unit tests
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Offline startup check
+        run: .venv/bin/python scripts/devcheck.py --no-ollama-check
+      - name: CLI entry point
+        run: .venv/bin/fredtux --help

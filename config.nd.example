@@ -1,0 +1,21 @@
+# FredTux 2.0 – lokale Beispielkonfiguration
+# Für eine andere Umgebung bitte die Werte anpassen.
+FREDTUX_BASE_URL=http://127.0.0.1:11434/v1
+FREDTUX_OLLAMA_URL=http://127.0.0.1:11434
+FREDTUX_MODEL=gemma4:latest
+FREDTUX_SKIP_OLLAMA_CHECK=0
+FREDTUX_API_HOST=127.0.0.1
+FREDTUX_API_PORT=8765
+FREDTUX_API_MODEL=fredtux-2-0
+FREDTUX_TIMEOUT=120
+FREDTUX_SHELL_MODE=coding
+FREDTUX_SHELL_ROOT=.
+FREDTUX_SHELL_WRITE_ROOT=.
+# Optionale zusätzliche Coding-Pfade (Komma-getrennt), z. B. Backup-Ziele:
+# FREDTUX_SHELL_EXTRA_ROOTS=~/BACKUP
+FREDTUX_SHELL_WRITE=1
+FREDTUX_CODING_TIMEOUT=300
+# Werkzeugschleifen: idle = Runden ohne erfolgreichen Werkzeugaufruf,
+# total = harte Obergrenze aller Runden (Sicherheitsnetz gegen Endlosschleifen).
+FREDTUX_MAX_IDLE_ROUNDS=6
+FREDTUX_MAX_TOTAL_ROUNDS=40

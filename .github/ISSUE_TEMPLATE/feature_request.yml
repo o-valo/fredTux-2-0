@@ -1,0 +1,34 @@
+name: Feature request / Funktionswunsch
+description: Funktion oder Architekturverbesserung vorschlagen / Suggest a feature or architecture improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antworte in deiner bevorzugten Sprache. / Answer in your preferred language.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Welches Problem soll gelöst werden? / What problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Vorgeschlagene Lösung / Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativen und Kompatibilität / Alternatives and compatibility
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: Die Änderung betrifft keine Secrets oder privaten Runtime-Daten. / The change does not affect secrets or private runtime data.
+          required: true
