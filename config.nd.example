@@ -7,6 +7,8 @@ FREDTUX_SKIP_OLLAMA_CHECK=0
 FREDTUX_API_HOST=127.0.0.1
 FREDTUX_API_PORT=8765
 FREDTUX_API_MODEL=fredtux-2-0
+# Timeout für Chat-Anfragen in Sekunden. Bei großen oder erst zu ladenden Modellen
+# dauert die erste Antwort länger – dann erhöhen (z. B. 600).
 FREDTUX_TIMEOUT=120
 FREDTUX_SHELL_MODE=coding
 FREDTUX_SHELL_ROOT=.

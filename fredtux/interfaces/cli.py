@@ -8,7 +8,7 @@ import sys
 from ..config import Config
 from ..core import AgentCore
 from .api import serve
-from ..llm import LLMClient, OllamaError
+from ..llm import LLMClient, LLMError, OllamaError
 
 
 HELP = """Befehle:
@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--no-ollama-check",
         action="store_true",
-        help="Prüfung von Ollama, Modell und geladenen Modellen überspringen",
+        help="Prüfung von Ollama, Modell, geladenen Modellen und Chat-Endpunkt überspringen",
     )
     parser.add_argument(
         "--serve",
@@ -52,14 +52,21 @@ def main() -> None:
         reason = "config.nd" if config.skip_ollama_check and not args.no_ollama_check else "Option"
         print(f"Ollama-Prüfung übersprungen ({reason}).")
     else:
+        client = LLMClient(config)
         try:
-            status = LLMClient(config).check_ollama()
+            status = client.check_ollama()
         except OllamaError as exc:
             print("Ollama-Verbindung fehlgeschlagen:", file=sys.stderr)
             print(str(exc), file=sys.stderr)
             print("\nHinweis: Mit --no-ollama-check kann der Chat auch ohne Vorprüfung gestartet werden.", file=sys.stderr)
             raise SystemExit(2) from exc
         print(status.summary())
+        try:
+            print(client.check_chat_endpoint())
+        except LLMError as exc:
+            print("Chat-Endpunkt nicht erreichbar:", file=sys.stderr)
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
 
     try:
         agent = AgentCore(config=config, session_id=args.session)
