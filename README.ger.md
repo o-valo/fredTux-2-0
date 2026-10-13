@@ -38,11 +38,18 @@ bash fredtux-install.sh
 .venv/bin/fredtux
 ```
 
-`fredtux-install.sh` prüft `python3` und `python3 -m venv`. Fehlen `python3`,
-`python3-venv` oder `python3-pip`, werden die benötigten Systempakete auf Debian/Ubuntu
-automatisch per `apt-get` installiert; dafür werden Root-Rechte oder `sudo` verwendet.
-Danach erstellt das Script die virtuelle Umgebung, installiert das Paket, legt `config.nd`
-aus `config.nd.example` an und erstellt die konfigurierten Laufzeitverzeichnisse.
+`fredtux-install.sh` prüft `python3`, `python3 -m venv` und `python3 -m ensurepip`. Fehlen
+`python3`, `python3-venv` oder `python3-pip`, werden die benötigten Systempakete auf
+Debian/Ubuntu automatisch per `apt-get` installiert; dafür werden Root-Rechte oder `sudo`
+verwendet. Danach erstellt das Script die virtuelle Umgebung, installiert das Paket, legt
+`config.nd` aus `config.nd.example` an und erstellt die konfigurierten
+Laufzeitverzeichnisse.
+
+Eine vorhandene `.venv` wird nur übernommen, wenn sie zu Python 3.10 oder neuer passt und
+`pip` enthält. Fehlt `pip` – etwa bei einer kopierten oder mit `--without-pip` erzeugten
+Umgebung –, installiert das Script es per `ensurepip` nach; ist die Umgebung darüber hinaus
+unbrauchbar, wird sie neu erstellt. Ohne diese Prüfung bricht der Aufruf sonst mit
+`No module named pip` ab.
 
 Die Datei `config.nd` ist bewusst versioniert und enthält nur Beispielwerte auf
 `127.0.0.1`. Echte API-Zugangsdaten gehören nicht in das Repository.

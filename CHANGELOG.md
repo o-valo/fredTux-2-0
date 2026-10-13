@@ -5,6 +5,17 @@ Keep a Changelog and the project uses semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- `fredtux-install.sh` übernimmt eine vorhandene `.venv` nur noch, wenn sie zu Python 3.10
+  oder neuer passt und `pip` enthält. Vorher genügte ein `.venv`-Ordner mit `bin/python`,
+  wie ihn ein abgebrochener `python3 -m venv`-Lauf auf Systemen ohne `python3-venv`
+  hinterlässt: Der nächste Aufruf brach dann mit `No module named pip` ab (beobachtet auf
+  `gift`, Ubuntu 24.04, Konto `bot`). Fehlt `pip`, wird es jetzt per `ensurepip`
+  nachinstalliert, sonst die Umgebung neu erstellt. Die Vorabprüfung fragt zusätzlich
+  `python3 -m ensurepip --version` ab, damit fehlende Systempakete gleich mitinstalliert
+  werden – `python3 -m venv --help` gelingt auch ohne `python3-venv`, die Prüfung schlug
+  also nicht an. Beides steht in README.md und README.ger.md.
+
 ## [0.5.0] - 2026-10-07
 
 ### Changed
