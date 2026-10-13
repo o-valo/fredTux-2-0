@@ -192,9 +192,13 @@ geladen). Der klassische Stolperstein ist eine `config.nd`, deren beide
 Adressen auf verschiedene Rechner zeigen:
 
 ```ini
-FREDTUX_OLLAMA_URL=http://10.7.0.24:11434   # Diagnose: geht, Modell gefunden
-FREDTUX_BASE_URL=http://192.168.200.216:11434/v1   # Chat: hier lauscht nichts
+# Diagnose: funktioniert, Modell gefunden
+FREDTUX_OLLAMA_URL=http://10.7.0.24:11434
+# Chat: hier lauscht nichts – diese Zeile war der Fehler
+FREDTUX_BASE_URL=http://192.168.200.216:11434/v1
 ```
+
+(Kommentare nur in eigenen Zeilen — ein `#` hinter einem Wert gehört zum Wert.)
 
 Dann läuft der Ollama-Vorcheck durch und erst die erste Nachricht scheitert mit
 `Connection refused` — ohne Hinweis, welche Adresse falsch ist. Jetzt bricht der
