@@ -181,6 +181,34 @@ is offline; the error distinguishes between an unreachable host and a slow
 response. If a model is missing, the available models are listed together with
 an `OLLAMA_HOST=... ollama pull ...` command.
 
+## Chat-endpoint pre-check
+
+Before the first prompt the CLI also checks whether anything answers at
+`FREDTUX_BASE_URL` (`GET <base_url>/models`, 10 s, no model is loaded by this).
+The classic pitfall is a `config.nd` whose two addresses point to different
+machines:
+
+```ini
+FREDTUX_OLLAMA_URL=http://10.7.0.24:11434   # diagnostics: works, model found
+FREDTUX_BASE_URL=http://192.168.200.216:11434/v1   # chat: nothing listens here
+```
+
+The Ollama pre-check passes, and only the first message then fails with
+`Connection refused` — with no hint about which address is wrong. Now the start
+aborts right away with exit code 2 and names the address, so a wrong value can
+be seen before typing. An HTTP error (e.g. 404 on `/models`) still counts as
+reachable, because some OpenAI-compatible servers do not implement the list.
+Use `--no-ollama-check` (or `FREDTUX_SKIP_OLLAMA_CHECK=1`) to skip the check.
+
+If the endpoint is reachable but the first answer takes too long, the timeout
+explains itself: a large or not-yet-loaded model needs longer than
+`FREDTUX_TIMEOUT` (default 120 s) for the first round. Raise it in `config.nd`
+for such a node:
+
+```ini
+FREDTUX_TIMEOUT=600
+```
+
 ## Operation
 
 ```text

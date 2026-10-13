@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from fredtux.config import Config
-from fredtux.llm import LLMClient, OllamaError
+from fredtux.llm import LLMClient, LLMError, OllamaError
 from fredtux.tools.shell import ShellTools
 
 
@@ -27,7 +27,7 @@ def main() -> int:
     parser.add_argument(
         "--no-ollama-check",
         action="store_true",
-        help="Nur Python-, Installations- und Dateisystemprüfung ausführen",
+        help="Nur Python-, Installations- und Dateisystemprüfung ausführen (ohne Netzwerkprüfung)",
     )
     args = parser.parse_args()
 
@@ -80,13 +80,20 @@ def main() -> int:
         reason = "config.nd" if config.skip_ollama_check and not args.no_ollama_check else "Option"
         print(f"Ollama-Prüfung: übersprungen ({reason})")
     else:
+        client = LLMClient(config)
         try:
-            status = LLMClient(config).check_ollama()
+            status = client.check_ollama()
         except OllamaError as exc:
             print(f"FEHLER: {exc}", file=sys.stderr)
             print("Hinweis: Mit --no-ollama-check lässt sich die lokale Installation allein prüfen.", file=sys.stderr)
             return 2
         print(f"Ollama: {status.summary()}")
+        try:
+            print(client.check_chat_endpoint())
+        except LLMError as exc:
+            print(f"FEHLER: {exc}", file=sys.stderr)
+            print("Hinweis: Mit --no-ollama-check lässt sich die lokale Installation allein prüfen.", file=sys.stderr)
+            return 2
 
     # Importiert die CLI und prüft damit den echten Startpfad ohne Eingabe.
     if not callable(cli_main) or not callable(AgentCore):

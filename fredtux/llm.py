@@ -115,6 +115,31 @@ class LLMClient:
         return configured == installed.split(":", 1)[0] or configured == installed
 
 
+    def check_chat_endpoint(self, timeout: float = 10.0) -> str:
+        """Prüft beim Start, ob unter base_url überhaupt ein Dienst antwortet.
+
+        Abgefragt wird nur /models: Das kostet keine Rechenzeit und lädt kein
+        Modell. Ein HTTP-Fehler (z. B. 404) belegt, dass der Dienst erreichbar
+        ist – abgebrochen wird nur bei Verbindungsfehlern. Genau dieser Fall
+        (config.nd zeigt auf einen Rechner ohne Modellserver) kostete bisher
+        erst bei der ersten Eingabe Zeit.
+        """
+        url = f"{self.config.base_url}/models"
+        request = urllib.request.Request(
+            url, headers={"Accept": "application/json", **self._auth_header()}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout):
+                return f"Chat-Endpunkt erreichbar: {self.config.base_url}"
+        except urllib.error.HTTPError:
+            return f"Chat-Endpunkt erreichbar: {self.config.base_url} (ohne /models-Liste)"
+        except TimeoutError as exc:
+            raise LLMError(self._timeout_message(url, timeout)) from exc
+        except urllib.error.URLError as exc:
+            raise LLMError(self._unreachable_message(self.config.base_url, exc)) from exc
+        except OSError as exc:
+            raise LLMError(f"Verbindung zu {self.config.base_url} fehlgeschlagen: {exc}") from exc
+
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -123,8 +148,9 @@ class LLMClient:
         }
         if tools:
             payload["tools"] = tools
+        url = f"{self.config.base_url}/chat/completions"
         request = urllib.request.Request(
-            f"{self.config.base_url}/chat/completions",
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json", **self._auth_header()},
             method="POST",
@@ -134,8 +160,16 @@ class LLMClient:
                 result = json.loads(response.read().decode("utf-8"))
             message = result["choices"][0]["message"]
             return {"content": message.get("content") or "", "tool_calls": message.get("tool_calls", [])}
-        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            raise LLMError(f"LLM-Endpunkt nicht erreichbar oder ungültige Antwort: {exc}") from exc
+        except urllib.error.HTTPError as exc:
+            raise LLMError(self._http_message(url, exc)) from exc
+        except TimeoutError as exc:
+            raise LLMError(self._timeout_message(url, self.config.request_timeout)) from exc
+        except urllib.error.URLError as exc:
+            raise LLMError(self._unreachable_message(self.config.base_url, exc)) from exc
+        except OSError as exc:
+            raise LLMError(f"Verbindung zu {url} fehlgeschlagen: {exc}") from exc
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            raise LLMError(f"Ungültige Antwort von {url}: {exc}") from exc
 
     def chat_stream(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
@@ -148,8 +182,9 @@ class LLMClient:
         }
         if tools:
             payload["tools"] = tools
+        url = f"{self.config.base_url}/chat/completions"
         request = urllib.request.Request(
-            f"{self.config.base_url}/chat/completions",
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json", **self._auth_header()},
             method="POST",
@@ -194,8 +229,46 @@ class LLMClient:
                 "content": "".join(content_parts),
                 "tool_calls": list(tool_calls.values()),
             }
-        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            raise LLMError(f"LLM-Streaming-Endpunkt nicht erreichbar oder ungültige Antwort: {exc}") from exc
+        except urllib.error.HTTPError as exc:
+            raise LLMError(self._http_message(url, exc)) from exc
+        except TimeoutError as exc:
+            raise LLMError(self._timeout_message(url, self.config.request_timeout)) from exc
+        except urllib.error.URLError as exc:
+            raise LLMError(self._unreachable_message(self.config.base_url, exc)) from exc
+        except OSError as exc:
+            raise LLMError(f"Verbindung zu {url} fehlgeschlagen: {exc}") from exc
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            raise LLMError(f"Ungültige Antwort von {url}: {exc}") from exc
 
     def _auth_header(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+
+    def _http_message(self, url: str, exc: urllib.error.HTTPError) -> str:
+        return f"LLM-Endpunkt {url} antwortete mit HTTP {exc.code}{self._http_detail(exc)}"
+
+    @staticmethod
+    def _http_detail(exc: urllib.error.HTTPError) -> str:
+        """Hängt die Fehlermeldung des Servers an (z. B. Ollamas 'model not found')."""
+        try:
+            body = exc.read().decode("utf-8", "replace").strip()
+        except Exception:  # Der Body ist nur eine Zugabe, nie ein Abbruchgrund.
+            return ""
+        return f": {body[:200]}" if body else ""
+
+    def _timeout_message(self, url: str, timeout: float) -> str:
+        return (
+            f"Zeitüberschreitung nach {timeout:g} Sekunden bei {url}. "
+            "Beim ersten Aufruf lädt der Server das Modell – große oder kalte Modelle brauchen dann "
+            "deutlich länger. Erhöhe in diesem Fall FREDTUX_TIMEOUT in config.nd (z. B. 600) "
+            "und prüfe, ob der Modellserver ausgelastet ist."
+        )
+
+    def _unreachable_message(self, base_url: str, exc: BaseException) -> str:
+        reason = getattr(exc, "reason", exc)
+        return (
+            f"LLM-Endpunkt {base_url} ist nicht erreichbar ({reason}). "
+            f"FREDTUX_BASE_URL in config.nd zeigt auf {base_url} – dort muss ein OpenAI-kompatibler "
+            "Dienst laufen (bei Ollama: OLLAMA_HOST=0.0.0.0 und passender Port). "
+            "Zeigt der Wert auf den falschen Rechner, korrigiere ihn; "
+            "mit --no-ollama-check lässt sich der Chat ohne Vorprüfung starten."
+        )

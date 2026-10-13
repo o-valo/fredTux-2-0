@@ -6,6 +6,18 @@ Keep a Changelog and the project uses semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- Falscher Chat-Endpunkt fällt jetzt beim Start auf statt erst bei der ersten Eingabe:
+  Die CLI prüft vor dem Prompt `GET <FREDTUX_BASE_URL>/models` (10 s, ohne Modell zu laden)
+  und bricht mit Exit-Code 2 ab, wenn dort nichts antwortet. Ursache war eine `config.nd`
+  auf `gift`, in der `FREDTUX_OLLAMA_URL` auf `10.7.0.24` zeigte (Vorcheck lief durch,
+  Modell gefunden) und `FREDTUX_BASE_URL` auf den eigenen Rechner `192.168.200.216`, wo
+  nichts auf Port 11434 lauscht – „Connection refused“ erst nach dem Tippen der ersten
+  Nachricht und ohne Hinweis auf die falsche Zeile. Die Fehlermeldungen des LLM-Clients
+  nennen jetzt den Endpunkt, den HTTP-Status samt Servermeldung bzw. bei Zeitüberschreitung
+  das Limit und den Hinweis auf `FREDTUX_TIMEOUT` (kalte/große Modelle brauchen beim ersten
+  Aufruf länger als die 120 s Standard, auf dem Testknoten gemessen). `scripts/devcheck.py`
+  prüft den Endpunkt ebenso; `--no-ollama-check` überspringt beide Prüfungen.
+  Sieben neue Tests in `tests/test_llm.py`, Doku in README.md und README.ger.md.
 - `fredtux-install.sh` übernimmt eine vorhandene `.venv` nur noch, wenn sie zu Python 3.10
   oder neuer passt und `pip` enthält. Vorher genügte ein `.venv`-Ordner mit `bin/python`,
   wie ihn ein abgebrochener `python3 -m venv`-Lauf auf Systemen ohne `python3-venv`
