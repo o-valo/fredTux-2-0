@@ -189,9 +189,14 @@ The classic pitfall is a `config.nd` whose two addresses point to different
 machines:
 
 ```ini
-FREDTUX_OLLAMA_URL=http://10.7.0.24:11434   # diagnostics: works, model found
-FREDTUX_BASE_URL=http://192.168.200.216:11434/v1   # chat: nothing listens here
+# diagnostics: works, model found
+FREDTUX_OLLAMA_URL=http://10.7.0.24:11434
+# chat: nothing listens here – this line was the mistake
+FREDTUX_BASE_URL=http://192.168.200.216:11434/v1
 ```
+
+(Comments must be on their own line — a `#` behind a value becomes part of the
+value.)
 
 The Ollama pre-check passes, and only the first message then fails with
 `Connection refused` — with no hint about which address is wrong. Now the start
