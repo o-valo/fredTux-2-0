@@ -12,7 +12,7 @@ der Python-Standardbibliothek. Er verbindet eine CLI-Oberfläche
 mit einem Agenten-Loop, dateibasierten Sitzungen, einem 
 Ollama-Client und austauschbaren Werkzeugen.
 
- **Projektstatus:** MVP / 0.5.0. CLI, lokale OpenAI-kompatible HTTP-API, Ollama-Vorcheck,
+ **Projektstatus:** MVP / 0.6.0. CLI, lokale OpenAI-kompatible HTTP-API, Ollama-Vorcheck,
  Session-Persistenz, Markdown-Protokollierung, SSE-Streaming und die lokalen RAG-Werkzeuge sind
  implementiert. Authentifizierung, TUI und MCP-Plugins sind noch nicht implementiert.
 
@@ -664,7 +664,7 @@ git diff --check
 ```
 
 Danach den Quellstand nach `main` auf GitHub pushen und die Version aus
-`pyproject.toml` (aktuell `0.5.0`) als Release veröffentlichen. Keine Secrets,
+`pyproject.toml` (aktuell `0.6.0`) als Release veröffentlichen. Keine Secrets,
 `.venv`-Inhalte oder privaten `~/.fredtux-2.0`-Daten committen.
 
 ## Lizenz

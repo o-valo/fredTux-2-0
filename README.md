@@ -12,7 +12,7 @@ FredTux 2.0 is a modular, local agent harness built on the Python standard libra
 It combines a CLI interface with an agent loop, file-based sessions, an Ollama
 client, and interchangeable tools.
 
-- **Project status:** MVP / 0.5.0. The CLI, the local OpenAI-compatible HTTP API,
+- **Project status:** MVP / 0.6.0. The CLI, the local OpenAI-compatible HTTP API,
 -  the Ollama pre-check, session persistence, Markdown logging, SSE streaming, and
 -  the local RAG tools are implemented. Authentication, the TUI, and MCP plugins are
 -  not implemented yet.
@@ -658,7 +658,7 @@ git diff --check
 ```
 
 Then push the current state to `main` on GitHub and publish the version from
-`pyproject.toml` (currently `0.5.0`) as a release. Do not commit secrets, `.venv`
+`pyproject.toml` (currently `0.6.0`) as a release. Do not commit secrets, `.venv`
 contents, or private `~/.fredtux-2.0` data.
 
 ## License
