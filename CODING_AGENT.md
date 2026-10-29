@@ -17,6 +17,7 @@
 13. **Nach Aufräumarbeiten** nur kurz das Ergebnis melden. Keine weitere Recherche oder Wiederholung, wenn die Aufgabe erledigt ist.
 14. **Regeländerungen sofort wirksam machen:** Nach jeder Änderung an `CODING_AGENT.md` `reload_rules` aufrufen, sonst gelten die neuen Regeln erst in der nächsten Sitzung.
 15. **Immer abschließend berichten:** Nach jedem Task eine klare Abschlussmeldung mit Ergebnis, ausgeführten Prüfungen und offenen Punkten senden. Bei Fehlern oder Abbruch immer den konkreten Grund, den letzten Zustand und den nächsten sicheren Schritt nennen; niemals ohne Rückmeldung enden.
+16. **Commit-Nachrichten nennen kein Werkzeug.** Keine Zeile wie „Generated with …“ und keine `Co-Authored-By`-Zeile für ein Programm: Autorenschaft ist eine Rolle für Menschen, die für den Code geradestehen. Was ein Werkzeug beigetragen hat, steht einmal im README-Abschnitt „Powered by AI“ und nicht in jeder Nachricht. Eine Nennung kommt nur in Frage, wenn eine Förderung sie ausdrücklich verlangt. Die Nachricht begründet stattdessen, warum sich etwas ändert.
 
 ## Wichtig
 
