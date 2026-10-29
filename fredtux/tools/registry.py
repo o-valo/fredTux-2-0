@@ -33,6 +33,7 @@ class ToolRegistry:
             "change_permissions": self._change_permissions,
         }
         self._extra_schemas: list[dict[str, Any]] = []
+        self.config = self.shell.config
 
     def register(
         self,
@@ -69,7 +70,15 @@ class ToolRegistry:
                     "description": "Durchsucht lokale Markdown-Wissensdateien nach relevanten Textstellen.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}},
+                        "properties": {
+                            "query": {"type": "string"},
+                            "include_archives": {
+                                "type": "boolean",
+                                "description": "Auch verdichtete Sitzungsarchive durchsuchen. "
+                                "Nur sinnvoll, wenn ausdruecklich nach aelteren Gespraechsverlaeufen "
+                                "gesucht wird; Archive sind zahlreicher als die eigentlichen Notizen.",
+                            },
+                        },
                         "required": ["query"],
                     },
                 },
@@ -170,15 +179,39 @@ class ToolRegistry:
             parsed = json.loads(arguments or "{}")
             if not isinstance(parsed, dict):
                 return "FEHLER: Werkzeugargumente müssen ein JSON-Objekt sein."
-            return self._tools[name](**parsed)
+            return self._cap_output(self._tools[name](**parsed))
         except (TypeError, ValueError, OSError) as exc:
             return f"FEHLER im Werkzeug {name!r}: {exc}"
+
+    def _cap_output(self, value: str) -> str:
+        """Kürzt Werkzeugergebnisse auf FREDTUX_MAX_TOOL_OUTPUT Zeichen.
+
+        Ein einzelnes Werkzeugergebnis (z. B. eine per curl geholte README)
+        kann leicht zehntausende Zeichen füllen und den Context der Session
+        aufbrauchen, bis der LLM-Aufruf mit HTTP 400 abbricht. Gekappt wird
+        in der Mitte, damit Anfang und Ende lesbar bleiben, plus ein Hinweis
+        mit Gesamtlänge und Empfehlung, gezielt weiterzulesen.
+        """
+        limit = self.config.max_tool_output
+        text = value if isinstance(value, str) else str(value)
+        if limit <= 0 or len(text) <= limit:
+            return text
+        head = limit // 2
+        tail = limit - head
+        omitted = len(text) - limit
+        return (
+            text[:head]
+            + f"\n\n[... {omitted} Zeichen vom Werkzeugergebnis entfernt, "
+            f"Gesamtlänge {len(text)}. Für Details gezielt weiterlesen, "
+            f"z. B. mit grep oder head/tail statt einer Vollausgabe.] ...\n\n"
+            + text[-tail:]
+        )
 
     def _save_knowledge(self, title: str, content: str) -> str:
         return save_knowledge(self.rag_dir, title, content)
 
-    def _search_knowledge(self, query: str) -> str:
-        return search_knowledge(self.rag_dir, query)
+    def _search_knowledge(self, query: str, include_archives: bool = False) -> str:
+        return search_knowledge(self.rag_dir, query, include_archives)
 
     def _list_knowledge(self) -> str:
         return list_knowledge(self.rag_dir)

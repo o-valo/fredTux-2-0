@@ -89,8 +89,13 @@ OpenAI-kompatiblen Hub. Es werden keine Anmeldedaten benötigt.
 | `FREDTUX_API_HOST` | `0.0.0.0` | Bind-Adresse des FredTux-HTTP-Servers |
 | `FREDTUX_API_PORT` | `8765` | Port des FredTux-HTTP-Servers |
 | `FREDTUX_API_MODEL` | `fredtux-2-0` | Virtueller OpenAPI-Modellname |
+| `FREDTUX_STREAM_LOG` | `1` | `1` schreibt jedem Lauf live mit (`<home>/logs/stream.log`) |
+| `FREDTUX_STREAM_LOG_FILE` | `<FREDTUX_HOME>/logs/stream.log` | Abweichender Pfad des Transparenzprotokolls |
 | `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Runden ohne erfolgreichen Werkzeugaufruf, bevor abgebrochen wird |
 | `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Harte Obergrenze aller Werkzeugrunden (Endlosschleifenschutz) |
+| `FREDTUX_LOG` | `0` | `1` schaltet das Aktivitätsprotokoll ein |
+| `FREDTUX_LOG_LEVEL` | `info` | `info` protokolliert den Ablauf, `debug` zusätzlich jede HTTP-Zeile |
+| `FREDTUX_LOG_FILE` | `<FREDTUX_HOME>/logs/fredtux.jsonl` | Abweichender Pfad des Aktivitätsprotokolls |
 
 ## Schnelles Umschalten mit `config.nd`
 
@@ -420,6 +425,52 @@ tail -F ~/.fredtux-2.0/logs/errors.jsonl
 Die Datei wird absichtlich nicht rotiert. Die vollständige Unterhaltung bleibt in den
 Sitzungsdateien unter `~/.fredtux-2.0/sessions/` erhalten.
 
+## Aktivitätsprotokoll (abschaltbar)
+
+Fehler allein reichen für die Diagnose nicht: Bei einer hängenden oder langsamen
+Antwort fehlt jede Spur, weil Fehler nur bei Ausnahmen geschrieben werden. Das
+Aktivitätsprotokoll schreibt den normalen Ablauf mit – und ist standardmäßig
+**aus**:
+
+```ini
+# config.nd
+FREDTUX_LOG=1
+FREDTUX_LOG_LEVEL=info
+# FREDTUX_LOG_FILE=~/logs/fredtux.jsonl
+```
+
+Ohne `FREDTUX_LOG_FILE` liegt die Datei unter
+`<FREDTUX_HOME>/logs/fredtux.jsonl`, also standardmäßig
+`~/.fredtux-2.0/logs/fredtux.jsonl`. Jeder Datensatz ist eine Zeile JSON:
+
+```json
+{"timestamp":"2026-10-21T13:58:02.113+00:00","level":"info","session_id":"session-20261021-135801","event":"request.end","stream":false,"status":"ok","rounds":1,"duration_ms":48217,"content_chars":412}
+```
+
+| Ereignis | Inhalt |
+|---|---|
+| `request.start` | Zeichen der Anfrage, Nachrichten in der Historie |
+| `llm.reply` | Dauer des Modellaufrufs, Zahl der Werkzeugaufrufe, Zeichen der Antwort |
+| `llm.error` | Fehler mit Dauer, Level `error` |
+| `tool.call` | Werkzeugname, Argumente, Dauer, `ok`, Zeichen des Ergebnisses |
+| `request.end` | `status` (`ok`, `tool_loop`, `round_limit`), Runden, Gesamtdauer |
+| `http.request`/`http.response` | Client, HTTP-Status, Dauer, Chunks beim Streamen |
+| `http.reject` | abgewiesene Anfrage mit Status und Begründung |
+| `http.access` | Zugriffszeile je Anfrage, nur mit `FREDTUX_LOG_LEVEL=debug` |
+
+Live mitlesen:
+
+```bash
+tail -F ~/.fredtux-2.0/logs/fredtux.jsonl
+```
+
+Prompts und Antworten werden **nicht** im Wortlaut abgelegt, nur Längen und bei
+Werkzeugen die Argumente (gekürzt). `FREDTUX_LOG=0` genügt, um alles abzuschalten;
+der Schalter wird bei jedem Start neu aus der Konfiguration gelesen, ein Neustart
+von `fredtux-api` ist dafür nötig. Ist die Datei nicht beschreibbar, läuft FredTux
+weiter und meldet den Fehler einmal auf `stderr` – Protokollieren darf eine
+Anfrage nie beenden.
+
 ## Coding-Agent-Regeln
 
 Die verbindlichen Betriebsregeln liegen in `CODING_AGENT.md` und werden bei jeder
@@ -442,13 +493,46 @@ würde erst nach einem Neustart greifen.
 der Gesprächsverlauf bleibt unangetastet. Die Antwort nennt den Ergebniszustand:
 
 ```text
-Regelwerk neu geladen: CODING_AGENT.md hat jetzt 27 Zeilen (+2). Die Regeln gelten ab sofort in dieser Sitzung.
-Regelwerk unverändert: CODING_AGENT.md mit 27 Zeilen ist bereits aktiv.
+Regelwerk neu geladen: CODING_AGENT.md mit 25 Zeilen, SYSTEM.md mit 17 Zeilen (+2 Zeilen). Die Regeln gelten ab sofort in dieser Sitzung.
+Regelwerk unverändert: CODING_AGENT.md mit 25 Zeilen, SYSTEM.md mit 17 Zeilen ist bereits aktiv.
 ```
 
 Ist `CODING_AGENT.md` nicht vorhanden, fällt der System-Prompt auf die reine
 Grundanweisung zurück. Fehlt in der Sitzung eine Systemnachricht, wird sie an
 Position 0 eingesetzt.
+
+## Systemüberblick beim Start: `SYSTEM.md`
+
+Damit der Agent nicht bei jeder Frage sein Konto durchsuchen muss, liegt im
+Projektordner eine kurze Überblicksdatei `SYSTEM.md`. Sie wird beim Sitzungsstart in
+den System-Prompt geladen und enthält **nur den Weg in die Wissensbasis**, nicht die
+Wissensbasis selbst:
+
+- `~/.fredtux-2.0/data/brain/rag/` – wo das RAG liegt und mit welchen drei
+  Werkzeugen man es benutzt (`list_knowledge`, `search_knowledge`, `save_knowledge`),
+- `rag/archiv/` – verdichtete alte Sitzungen, nur mit `include_archives=true`,
+- die Reihenfolge: RAG zuerst, dann Projektdateien, zuletzt die Shell,
+- die Erinnerung, nach jeder erledigten Aufgabe genau einen Eintrag dort abzulegen.
+
+Hosts, Adressen, Protokollpfade und Eigenheiten des Systems gehören **nicht** in
+diese Datei, sondern als Eintrag ins RAG: dort wachsen sie mit, statt zu veralten,
+und werden nur geladen, wenn sie gebraucht werden.
+
+Der Überblick steht **wörtlich** im Prompt, nicht als Verweis: das Modell soll ihn
+lesen, ohne erst ein Werkzeug zu rufen. Weil der System-Prompt bei jeder Runde erneut
+durch das Prefill läuft, ist `FREDTUX_SYSTEM_MAX_CHARS` (Standard 1200) eine
+Obergrenze gegen Wildwuchs – was darüber hinausgeht, wird abgeschnitten und im Text
+gekennzeichnet.
+
+```text
+FREDTUX_SYSTEM_BRIEFING=1      # 0 schaltet den Überblick ab
+FREDTUX_SYSTEM_FILE=SYSTEM.md  # relativ zum Projektordner; Standardwert
+FREDTUX_SYSTEM_MAX_CHARS=1200  # Obergrenze in Zeichen
+```
+
+`reload_rules` lädt Regeln **und** Überblick neu. Ist die Datei nicht vorhanden,
+startet der Agent mit der reinen Grundanweisung – ein fehlender Überblick ist kein
+Fehler, nur ein Verlust an Orientierung.
 
 ## Agenten- und Werkzeugarchitektur
 

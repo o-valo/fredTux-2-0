@@ -267,5 +267,134 @@ class ToolLoopBudgetTests(unittest.TestCase):
         self.assertIn("Runden gesamt=3", records[-1])
 
 
+class DenkLLM:
+    """Schickt Denkausgabe, dann sichtbaren Text, dann das Ende."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, history, schemas):
+        self.calls += 1
+        return {"content": "Hallo", "reasoning": "Ich überlege.", "tool_calls": []}
+
+    def chat_stream(self, history, schemas):
+        self.calls += 1
+        yield {"type": "reasoning", "content": "Ich überlege. "}
+        yield {"type": "content", "content": "Hallo"}
+        yield {"type": "complete", "content": "Hallo", "tool_calls": []}
+
+
+class TransparenzTests(unittest.TestCase):
+    def test_denken_und_marker_kommen_ueber_events(self):
+        core = make_core(llm=DenkLLM())
+        ereignisse: list = []
+        text = "".join(core.ask_stream("Hallo", events=ereignisse.append))
+        self.assertEqual(text, "Hallo")
+        arten = [e["type"] for e in ereignisse]
+        self.assertIn("reasoning", arten)
+        self.assertIn("marker", arten)
+        inhalt = "".join(e["content"] for e in ereignisse)
+        self.assertIn("Ich überlege.", inhalt)
+        self.assertIn("[Runde 1]", inhalt)
+        self.assertIn("[Ende]", inhalt)
+
+    def test_protokoll_haelt_den_ganzen_lauf_fest(self):
+        core = make_core(llm=DenkLLM())
+        list(core.ask_stream("Hallo"))
+        protokoll = core.config.stream_log_path.read_text(encoding="utf-8")
+        self.assertIn("[Runde 1]", protokoll)
+        self.assertIn("[denkt] Ich überlege.", protokoll)
+        self.assertIn("[text] Hallo", protokoll)
+        self.assertIn("[Ende]", protokoll)
+        self.assertRegex(protokoll.splitlines()[0], r"^\d{2}:\d{2}:\d{2}\.\d{3}")
+
+    def test_protokoll_laesst_sich_abschalten(self):
+        core = make_core(llm=DenkLLM(), stream_log=False)
+        list(core.ask_stream("Hallo"))
+        self.assertFalse(core.config.stream_log_path.exists())
+
+    def test_nicht_streamender_aufruf_landet_ebenfalls_im_protokoll(self):
+        core = make_core(llm=DenkLLM())
+        self.assertEqual(core.ask("Hallo"), "Hallo")
+        protokoll = core.config.stream_log_path.read_text(encoding="utf-8")
+        self.assertIn("[denkt] Ich überlege.", protokoll)
+        self.assertIn("[Runde 1]", protokoll)
+
+
+class SystemBriefingTests(unittest.TestCase):
+    """Der Systemüberblick, mit dem jede Sitzung startet."""
+
+    def make_core(self, briefing: str | None = "## RAG\nAlle Notizen unter ~/.fredtux-2.0/data/brain/rag/\n", **overrides):
+        root = Path(tempfile.mkdtemp())
+        config = Config(home=root, base_url="http://unused/v1", model="fake", api_key=None, **overrides)
+        core = AgentCore(config, session_id="briefing-test")
+        core.rules_path = root / "CODING_AGENT.md"
+        core.rules_path.write_text("Regel eins.\n", encoding="utf-8")
+        core.briefing_path = root / "SYSTEM.md"
+        if briefing is not None:
+            core.briefing_path.write_text(briefing, encoding="utf-8")
+        core.history = [{"role": "system", "content": core.system_prompt()}]
+        return core
+
+    def test_ueberblick_steht_im_systemprompt(self):
+        core = self.make_core("## Wo ich laufe\npi-ki ist 10.7.0.125.\n")
+        prompt = core.history[0]["content"]
+        self.assertIn("Systemüberblick", prompt)
+        self.assertIn("pi-ki ist 10.7.0.125.", prompt)
+
+    def test_verweis_auf_das_rag_kommt_beim_modell_an(self):
+        core = self.make_core()
+        self.assertIn("~/.fredtux-2.0/data/brain/rag/", core.history[0]["content"])
+
+    def test_mitgelieferte_datei_existiert_und_wird_geladen(self):
+        core = make_core()
+        self.assertTrue(core.briefing_path.is_file())
+        self.assertEqual(core.briefing_path.name, "SYSTEM.md")
+        self.assertIn("data/brain/rag", core.system_prompt())
+
+    def test_fehlende_datei_aendert_den_prompt_nicht(self):
+        core = self.make_core(briefing=None)
+        prompt = core.system_prompt()
+        self.assertNotIn("Systemüberblick (SYSTEM.md)", prompt)
+        self.assertIn("Du bist FredTux", prompt)
+        self.assertIn("Verbindliche Coding-Regeln", prompt)
+
+    def test_abschalter_laesst_den_ueberblick_weg(self):
+        core = self.make_core("Nur ein Test.\n", system_briefing=False)
+        self.assertNotIn("Nur ein Test.", core.system_prompt())
+
+    def test_zu_grosser_ueberblick_wird_gekuerzt(self):
+        core = self.make_core("A" * 5000 + "\nENDE-DES-TEXTES\n", system_max_chars=1000)
+        prompt = core.system_prompt()
+        self.assertIn("Systemüberblick gekürzt", prompt)
+        self.assertIn("Zeichen, hier 1000", prompt)
+        self.assertNotIn("ENDE-DES-TEXTES", prompt)
+        self.assertLess(len(core.system_briefing()), 1200)
+
+    def test_eigener_pfad_aus_der_konfiguration(self):
+        root = Path(tempfile.mkdtemp())
+        own = root / "UEBERBLICK.md"
+        own.write_text("Eigener Überblick.\n", encoding="utf-8")
+        config = Config(
+            home=root, base_url="http://unused/v1", model="fake", api_key=None, system_file=own
+        )
+        core = AgentCore(config, session_id="briefing-pfad-test")
+        self.assertEqual(core.briefing_path, own)
+        self.assertIn("Eigener Überblick.", core.system_prompt())
+
+    def test_reload_rules_nimmt_einen_geaenderten_ueberblick_mit(self):
+        core = self.make_core("Erster Stand.\n")
+        core.briefing_path.write_text("Zweiter Stand.\n", encoding="utf-8")
+        result = core.tools.call("reload_rules", "{}")
+        self.assertIn("neu geladen", result)
+        self.assertIn("SYSTEM.md", result)
+        self.assertIn("Zweiter Stand.", core.history[0]["content"])
+        self.assertNotIn("Erster Stand.", core.history[0]["content"])
+
+    def test_reload_rules_ohne_aenderung_meldet_unveraendert(self):
+        core = self.make_core("Gleicher Stand.\n")
+        self.assertIn("unverändert", core.tools.call("reload_rules", "{}"))
+
+
 if __name__ == "__main__":
     unittest.main()

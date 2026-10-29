@@ -7,6 +7,13 @@ FREDTUX_SKIP_OLLAMA_CHECK=0
 FREDTUX_API_HOST=127.0.0.1
 FREDTUX_API_PORT=8765
 FREDTUX_API_MODEL=fredtux-2-0
+# Wie lange eine Anfrage auf den einen Laufplatz warten darf, in Sekunden.
+# FredTux rechnet immer nur eine Anfrage zur Zeit; der Rest wartet. Ohne
+# Grenze hängt ein Client, bis sein eigenes Zeitlimit greift (bei langsamen
+# Modellen eine Stunde). 0 = nicht warten (sofort HTTP 429), negativ = altes
+# Verhalten, unbegrenzt warten. Wer aufgibt, wird erkannt und belegt keinen
+# Platz.
+FREDTUX_QUEUE_TIMEOUT=300
 # Timeout für Chat-Anfragen in Sekunden. Bei großen oder erst zu ladenden Modellen
 # dauert die erste Antwort länger – dann erhöhen (z. B. 600).
 FREDTUX_TIMEOUT=120
@@ -21,3 +28,59 @@ FREDTUX_CODING_TIMEOUT=300
 # total = harte Obergrenze aller Runden (Sicherheitsnetz gegen Endlosschleifen).
 FREDTUX_MAX_IDLE_ROUNDS=6
 FREDTUX_MAX_TOTAL_ROUNDS=40
+
+# Context-Fenster und Werkzeugergebnisse (neu in 0.6.0)
+# Ohne FREDTUX_NUM_CTX nutzt Ollama seinen eigenen Default (häufig 32768). Bei
+# langen Sitzungen bricht der Aufruf dann mit HTTP 400 "exceeds the available
+# context size" ab. Der Wert wird pro Anfrage als options.num_ctx mitgeschickt
+# – das wirkt nur bei Servern, die das auch auswerten. 0 = Server-Default.
+FREDTUX_NUM_CTX=0
+# Werkzeugergebnisse werden auf diese Zeichenlänge gekappt (Anfang und Ende
+# bleiben lesbar). Verhindert, dass ein einzelnes curl oder cat den Context
+# auffrisst. 200 = Mindestwert.
+FREDTUX_MAX_TOOL_OUTPUT=8000
+# Oberhalb von CONTEXT_LIMIT Tokens verdichtet Fred die aeltesten Runden: sie
+# werden zusammengefasst, aus dem Prompt genommen und in der Wissensbank
+# unter <RAG>/archiv/ abgelegt. Ohne diese Grenze waechst die Historie
+# unbegrenzt mit und irgendwann bricht der Aufruf ab.
+FREDTUX_CONTEXT_LIMIT=24000
+# So viele juengste Nachrichten bleiben immer unangetastet. Werkzeugpaare
+# (assistant mit tool_calls plus tool-Antwort) werden nie zerschnitten.
+# Mindestens 4.
+FREDTUX_KEEP_RECENT=8
+# Verdichtete Runden als Datei ablegen, damit sie über search_knowledge mit
+# include_archives=true wieder auffindbar sind. 0 = nur im Prompt zusammenfassen.
+FREDTUX_ARCHIVE_EVICTED=1
+# Obergrenze fuer die Zusammenfassung selbst, in Zeichen.
+FREDTUX_SUMMARY_MAX_CHARS=2000
+
+# Transparenzprotokoll – standardmäßig an. Schreibt jedem Lauf live mit:
+# Rundenbeginn, Denkausgabe des Modells, Werkzeugaufrufe samt Ergebnis und den
+# sichtbaren Text, jede Zeile mit Zeitstempel. Damit sieht man mit
+#    tail -F ~/.fredtux-2.0/logs/stream.log
+# was der Agent gerade tut – und vor allem, wann zuletzt etwas passiert ist.
+# Ein Lauf, der auf ein Zeitlimit zuläuft, bleibt dort stehen.
+FREDTUX_STREAM_LOG=1
+# FREDTUX_STREAM_LOG_FILE=~/logs/stream.log
+
+# Systemüberblick – standardmäßig an. SYSTEM.md wird beim Sitzungsstart in den
+# Systemprompt geladen und zeigt den Weg in die Wissensbasis
+# (~/.fredtux-2.0/data/brain/rag/), nicht die Wissensbasis selbst. Alles
+# Weitere gehört als Eintrag ins RAG – dort wächst es mit, statt zu veralten.
+FREDTUX_SYSTEM_BRIEFING=1
+# Leer lassen = SYSTEM.md im Projektordner. Ein relativer Pfad gilt ab
+# Projektordner, ein absoluter wie angegeben.
+# FREDTUX_SYSTEM_FILE=SYSTEM.md
+# Obergrenze in Zeichen gegen Wildwuchs. Der Systemprompt läuft bei JEDER Runde
+# erneut durch das Prefill – auf einem CPU-Knoten ist ein übergroßer Überblick
+# teuer. Was darüber hinausgeht, wird abgeschnitten und gekennzeichnet.
+FREDTUX_SYSTEM_MAX_CHARS=1200
+
+# Aktivitätsprotokoll – standardmäßig aus.
+# 1 = Anfragen, Modellrunden, Werkzeugaufrufe und Dauern als JSON Lines
+# mitschreiben. Ohne FREDTUX_LOG_FILE liegt die Datei unter
+# <FREDTUX_HOME>/logs/fredtux.jsonl.
+FREDTUX_LOG=0
+# info = Ablauf und Zeiten, debug = zusätzlich jede HTTP-Zugriffszeile.
+FREDTUX_LOG_LEVEL=info
+# FREDTUX_LOG_FILE=~/logs/fredtux.jsonl

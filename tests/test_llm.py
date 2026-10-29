@@ -110,5 +110,58 @@ class ChatEndpointCheckTests(unittest.TestCase):
         self.assertIn("OLLAMA_HOST=0.0.0.0", message)
 
 
+class FakeStream:
+    """Antwortobjekt, das sich zeilenweise lesen lässt (SSE)."""
+
+    def __init__(self, zeilen):
+        self.zeilen = [z.encode("utf-8") for z in zeilen]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def __iter__(self):
+        return iter(self.zeilen)
+
+
+class DenkausgabeTests(unittest.TestCase):
+    def make_client(self):
+        return LLMClient(
+            Config(
+                home=Path(tempfile.gettempdir()) / "fredtux-test-home",
+                base_url="http://192.168.200.216:11434/v1",
+                model="gemma4:12b",
+                api_key=None,
+                request_timeout=5,
+            )
+        )
+
+    @patch("fredtux.llm.urllib.request.urlopen")
+    def test_stream_reicht_denkausgabe_unter_beiden_feldnamen_weiter(self, urlopen):
+        urlopen.return_value = FakeStream([
+            'data: {"choices":[{"delta":{"reasoning_content":"erst "}}]}',
+            'data: {"choices":[{"delta":{"reasoning":"denken"}}]}',
+            'data: {"choices":[{"delta":{"content":"Antwort"}}]}',
+            'data: [DONE]',
+        ])
+        ereignisse = list(self.make_client().chat_stream([{"role": "user", "content": "Hallo"}]))
+        arten = [e["type"] for e in ereignisse]
+        self.assertEqual(arten, ["reasoning", "reasoning", "content", "complete"])
+        denkt = "".join(e["content"] for e in ereignisse if e["type"] == "reasoning")
+        self.assertEqual(denkt, "erst denken")
+        self.assertEqual(ereignisse[-1]["content"], "Antwort")
+
+    @patch("fredtux.llm.urllib.request.urlopen")
+    def test_chat_nimmt_denkausgabe_mit(self, urlopen):
+        urlopen.return_value = FakeResponse(
+            {"choices": [{"message": {"content": "Antwort", "reasoning_content": "weil"}}]}
+        )
+        antwort = self.make_client().chat([{"role": "user", "content": "Hallo"}])
+        self.assertEqual(antwort["content"], "Antwort")
+        self.assertEqual(antwort["reasoning"], "weil")
+
+
 if __name__ == "__main__":
     unittest.main()

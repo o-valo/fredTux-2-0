@@ -18,10 +18,17 @@ def save_knowledge(rag_dir: Path, title: str, content: str) -> str:
     return f"Gespeichert: {path}"
 
 
-def search_knowledge(rag_dir: Path, query: str) -> str:
+def search_knowledge(rag_dir: Path, query: str, include_archives: bool = False) -> str:
     terms = [term.casefold() for term in re.findall(r"\w+", query) if len(term) > 2]
     results: list[tuple[int, Path, str]] = []
-    for path in sorted(rag_dir.glob("*.md")):
+    if include_archives:
+        # Archive liegen in einem Unterverzeichnis und wachsen stark; nur auf
+        # ausdruecklichen Wunsch mitdurchsuchen, sonst verdraengen sie die
+        # eigentlichen Notizen aus den Top-5-Treffern.
+        paths = sorted(rag_dir.glob("*.md")) + sorted((rag_dir / "archiv").glob("*.md"))
+    else:
+        paths = sorted(rag_dir.glob("*.md"))
+    for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         score = sum(text.casefold().count(term) for term in terms)
         if score:
@@ -34,4 +41,13 @@ def search_knowledge(rag_dir: Path, query: str) -> str:
 
 def list_knowledge(rag_dir: Path) -> str:
     files = sorted(path.name for path in rag_dir.glob("*.md"))
-    return "Wissensdateien:\n" + ("\n".join(f"- {name}" for name in files) if files else "(noch keine)")
+    listed = "Wissensdateien:\n" + ("\n".join(f"- {name}" for name in files) if files else "(noch keine)")
+    archive_dir = rag_dir / "archiv"
+    if archive_dir.is_dir():
+        archives = sorted(archive_dir.glob("*.md"))
+        if archives:
+            listed += (
+                f"\n\nVerdichtete Sitzungsarchive: {len(archives)} Datei(en) im Unterverzeichnis "
+                "'archiv'. Nur mit search_knowledge und include_archives=true durchsuchbar."
+            )
+    return listed

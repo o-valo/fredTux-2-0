@@ -89,8 +89,14 @@ an Ollama node and not an OpenAI-compatible hub. No credentials are required.
 | `FREDTUX_API_HOST` | `0.0.0.0` | Bind address of the FredTux HTTP server |
 | `FREDTUX_API_PORT` | `8765` | Port of the FredTux HTTP server |
 | `FREDTUX_API_MODEL` | `fredtux-2-0` | Virtual OpenAPI model name |
+| `FREDTUX_QUEUE_TIMEOUT` | `300` | Seconds a request may wait for the single run slot; `0` = don't wait (429), `< 0` = wait forever |
+| `FREDTUX_STREAM_LOG` | `1` | `1` writes every run live to `<home>/logs/stream.log` |
+| `FREDTUX_STREAM_LOG_FILE` | `<FREDTUX_HOME>/logs/stream.log` | Alternative path for the transparency log |
 | `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Rounds without a successful tool call before aborting |
 | `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Hard upper bound on all tool rounds (runaway-loop guard) |
+| `FREDTUX_LOG` | `0` | `1` enables the activity log |
+| `FREDTUX_LOG_LEVEL` | `info` | `info` logs the flow, `debug` adds every HTTP access line |
+| `FREDTUX_LOG_FILE` | `<FREDTUX_HOME>/logs/fredtux.jsonl` | Alternative path for the activity log |
 
 ## Switching endpoints quickly with `config.nd`
 
@@ -416,6 +422,50 @@ tail -F ~/.fredtux-2.0/logs/errors.jsonl
 The file is intentionally not rotated. The full conversation remains in the
 session files under `~/.fredtux-2.0/sessions/`.
 
+## Activity log (switchable)
+
+Errors alone are not enough for diagnosis: when a reply hangs or crawls, there is
+no trace, because errors are only written on exceptions. The activity log records
+the normal flow too – and is **off** by default:
+
+```ini
+# config.nd
+FREDTUX_LOG=1
+FREDTUX_LOG_LEVEL=info
+# FREDTUX_LOG_FILE=~/logs/fredtux.jsonl
+```
+
+Without `FREDTUX_LOG_FILE` the file lives at
+`<FREDTUX_HOME>/logs/fredtux.jsonl`, by default
+`~/.fredtux-2.0/logs/fredtux.jsonl`. Every record is one JSON line:
+
+```json
+{"timestamp":"2026-10-21T13:58:02.113+00:00","level":"info","session_id":"session-20261021-135801","event":"request.end","stream":false,"status":"ok","rounds":1,"duration_ms":48217,"content_chars":412}
+```
+
+| Event | Content |
+|---|---|
+| `request.start` | characters of the request, messages in the history |
+| `llm.reply` | model call duration, number of tool calls, characters of the reply |
+| `llm.error` | error with duration, level `error` |
+| `tool.call` | tool name, arguments, duration, `ok`, characters of the result |
+| `request.end` | `status` (`ok`, `tool_loop`, `round_limit`), rounds, total duration |
+| `http.request`/`http.response` | client, HTTP status, duration, chunk count when streaming |
+| `http.reject` | rejected request with status and reason |
+| `http.access` | one access line per request, only with `FREDTUX_LOG_LEVEL=debug` |
+
+Follow it live:
+
+```bash
+tail -F ~/.fredtux-2.0/logs/fredtux.jsonl
+```
+
+Prompts and replies are **not** stored verbatim, only their lengths and – for
+tools – the (shortened) arguments. `FREDTUX_LOG=0` turns everything off; the
+switch is read at startup, so `fredtux-api` has to be restarted. If the file is
+not writable, FredTux keeps running and reports the problem once on `stderr` –
+logging must never end a request.
+
 ## Coding agent rules
 
 The binding operating rules are in `CODING_AGENT.md` and are loaded into the
@@ -437,13 +487,45 @@ the rule would only take effect after a restart.
 conversation history remains untouched. The response states the resulting state:
 
 ```text
-Rule set reloaded: CODING_AGENT.md now has 27 lines (+2). The rules apply immediately in this session.
-Rule set unchanged: CODING_AGENT.md with 27 lines is already active.
+Rule set reloaded: CODING_AGENT.md with 25 lines, SYSTEM.md with 17 lines (+2 lines). The rules apply immediately in this session.
+Rule set unchanged: CODING_AGENT.md with 25 lines, SYSTEM.md with 17 lines is already active.
 ```
 
 If `CODING_AGENT.md` does not exist, the system prompt falls back to the plain
 base instruction. If the session has no system message, it is inserted at
 position 0.
+
+## System overview at startup: `SYSTEM.md`
+
+So the agent does not have to search its account for every question, the project
+folder contains a short overview file `SYSTEM.md`. It is loaded into the system
+prompt when a session starts and contains **only the way into the knowledge base**,
+not the knowledge base itself:
+
+- `~/.fredtux-2.0/data/brain/rag/` – where the RAG lives and which three tools use
+  it (`list_knowledge`, `search_knowledge`, `save_knowledge`),
+- `rag/archiv/` – compacted old sessions, only with `include_archives=true`,
+- the order: RAG first, then project files, the shell last,
+- the reminder to store exactly one entry there after every completed task.
+
+Hosts, addresses, log paths and system quirks do **not** belong in this file but as
+entries in the RAG: there they grow instead of going stale, and they are only loaded
+when they are needed.
+
+The overview is in the prompt **verbatim**, not as a reference: the model should
+read it without calling a tool first. Because the system prompt passes through the
+prefill on every round, `FREDTUX_SYSTEM_MAX_CHARS` (default 1200) is a guard against
+bloat – anything beyond it is cut off and marked in the text.
+
+```text
+FREDTUX_SYSTEM_BRIEFING=1      # 0 disables the overview
+FREDTUX_SYSTEM_FILE=SYSTEM.md  # relative to the project folder; default
+FREDTUX_SYSTEM_MAX_CHARS=1200  # upper bound in characters
+```
+
+`reload_rules` reloads the rules **and** the overview. If the file is missing, the
+agent starts with the plain base instruction – a missing overview is not an error,
+only a loss of orientation.
 
 ## Agent and tool architecture
 

@@ -113,6 +113,51 @@ tail -F ~/.fredtux-2.0/logs/errors.jsonl
 The file is not rotated. The full session output additionally remains in the
 Markdown/JSON session files under `~/.fredtux-2.0/sessions/`.
 
+For the normal flow there is also the **activity log**, when it is enabled in the
+configuration:
+
+```ini
+FREDTUX_LOG=1
+FREDTUX_LOG_LEVEL=info
+```
+
+```bash
+tail -F ~/.fredtux-2.0/logs/fredtux.jsonl
+```
+
+It records `request.start` per request, `llm.reply` per round with duration and
+number of tool calls, each tool call with duration and result length, and
+`request.end` with status and total duration. That makes a slow reply
+attributable: model loading, long inference, or a tool loop. Without
+`FREDTUX_LOG=1` the file is not created.
+
+## Watching a run live
+
+The **transparency log** is on by default (`FREDTUX_STREAM_LOG=1`) and writes
+the running agent's work as plain text, one line per event, milliseconds in
+front:
+
+```bash
+tail -F ~/.fredtux-2.0/logs/stream.log
+```
+
+```text
+18:17:15.421  [Runde 1] codehamr-agent:latest: 12 Nachrichten im Kontext
+18:17:15.971  [denkt] Ich prüfe zuerst, ob die Datei existiert.
+18:17:17.374  [text] Die Datei fehlt, ich lege sie an.
+18:17:18.010  [Werkzeug] write_file {"path":"notiz.md"}
+18:17:18.412  [Werkzeug] write_file → ok, 18 Zeichen, 402 ms
+18:19:41.003  [Runde 2] codehamr-agent:latest: 14 Nachrichten im Kontext
+```
+
+The timestamps are the point: if the last line is minutes old, the model is
+still computing and the run is heading for the timeout – that is visible long
+before the request aborts. Streaming clients (OpenWebUI and anything else that
+understands `reasoning_content`) receive the same markers and the model's
+reasoning as `delta.reasoning_content`, so thinking stays separate from the
+answer. `FREDTUX_STREAM_LOG=0` switches it off; `FREDTUX_STREAM_LOG_FILE`
+moves the file.
+
 ## Do not confuse the model nodes
 
 - `http://<ollama-testnode>:11434`: direct Ollama test node

@@ -9,6 +9,13 @@
 Reads the runtime configuration from environment variables and creates the data
 directories. `FREDTUX_HOME` is the single central runtime root.
 
+### `fredtux.activitylog.ActivityLog`
+
+Writes the normal flow as JSON Lines (request, model rounds, tool calls,
+durations) and is switchable via `FREDTUX_LOG`. Separate from the error log,
+because errors must be kept even when the activity log is off. A write failure
+never ends a request.
+
 ### `fredtux.llm.LLMClient`
 
 Encapsulates two roles:
@@ -31,8 +38,8 @@ CORS policy yet.
 ### `fredtux.core.AgentCore`
 
 Holds the system prompt, the message history, the session store, and the tool
-registry. The system prompt loads `CODING_AGENT.md` with the binding anti-loop
-and coding rules. After a tool response, the next LLM request is executed; the
+registry. The system prompt loads the system overview from `SYSTEM.md` and
+`CODING_AGENT.md` with the binding anti-loop and coding rules. After a tool response, the next LLM request is executed; the
 loop limits `FREDTUX_MAX_IDLE_ROUNDS` and `FREDTUX_MAX_TOTAL_ROUNDS` prevent runaway
 loops.
 

@@ -23,6 +23,7 @@ class Config:
     api_host: str = "0.0.0.0"
     api_port: int = 8765
     api_model: str = "fredtux-2-0"
+    queue_timeout: float = 300.0
     shell_mode: str = "allowlist"
     shell_root: Path = Path(".")
     shell_write_root: Path = Path(".")
@@ -33,6 +34,20 @@ class Config:
     coding_timeout: float = 300.0
     max_idle_rounds: int = 6
     max_total_rounds: int = 40
+    num_ctx: int = 0
+    max_tool_output: int = 8000
+    context_limit: int = 24000
+    keep_recent: int = 8
+    archive_evicted: bool = True
+    summary_max_chars: int = 2000
+    log_enabled: bool = False
+    log_level: str = "info"
+    log_file: Path | None = None
+    stream_log: bool = True
+    stream_log_file: Path | None = None
+    system_briefing: bool = True
+    system_file: Path | None = None
+    system_max_chars: int = 1200
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,6 +72,7 @@ class Config:
             api_host=get("FREDTUX_API_HOST", "0.0.0.0").strip(),
             api_port=int(get("FREDTUX_API_PORT", "8765")),
             api_model=get("FREDTUX_API_MODEL", "fredtux-2-0").strip(),
+            queue_timeout=float(get("FREDTUX_QUEUE_TIMEOUT", "300")),
             shell_mode=get("FREDTUX_SHELL_MODE", "allowlist").strip().lower(),
             shell_root=_project_path(get("FREDTUX_SHELL_ROOT", ".")),
             shell_write_root=_project_path(get("FREDTUX_SHELL_WRITE_ROOT", ".")),
@@ -67,6 +83,20 @@ class Config:
             coding_timeout=float(get("FREDTUX_CODING_TIMEOUT", "300")),
             max_idle_rounds=max(1, int(get("FREDTUX_MAX_IDLE_ROUNDS", "6"))),
             max_total_rounds=max(1, int(get("FREDTUX_MAX_TOTAL_ROUNDS", "40"))),
+            num_ctx=max(0, int(get("FREDTUX_NUM_CTX", "0"))),
+            max_tool_output=max(200, int(get("FREDTUX_MAX_TOOL_OUTPUT", "8000"))),
+            context_limit=max(1000, int(get("FREDTUX_CONTEXT_LIMIT", "24000"))),
+            keep_recent=max(2, int(get("FREDTUX_KEEP_RECENT", "8"))),
+            archive_evicted=_as_bool(get("FREDTUX_ARCHIVE_EVICTED", "1")),
+            summary_max_chars=max(200, int(get("FREDTUX_SUMMARY_MAX_CHARS", "2000"))),
+            log_enabled=_as_bool(get("FREDTUX_LOG", "0")),
+            log_level=get("FREDTUX_LOG_LEVEL", "info").strip().lower(),
+            log_file=_optional_path(get("FREDTUX_LOG_FILE", "")),
+            stream_log=_as_bool(get("FREDTUX_STREAM_LOG", "1")),
+            stream_log_file=_optional_path(get("FREDTUX_STREAM_LOG_FILE", "")),
+            system_briefing=_as_bool(get("FREDTUX_SYSTEM_BRIEFING", "1")),
+            system_file=_optional_path(get("FREDTUX_SYSTEM_FILE", "SYSTEM.md")),
+            system_max_chars=max(200, int(get("FREDTUX_SYSTEM_MAX_CHARS", "1200"))),
         )
 
     @property
@@ -81,10 +111,24 @@ class Config:
     def error_log_path(self) -> Path:
         return self.home / "logs" / "errors.jsonl"
 
+    @property
+    def activity_log_path(self) -> Path:
+        """Pfad des Aktivitätsprotokolls; ohne ``FREDTUX_LOG_FILE`` unter ``<home>/logs``."""
+        return self.log_file or (self.home / "logs" / "fredtux.jsonl")
+
+    @property
+    def stream_log_path(self) -> Path:
+        """Pfad des Transparenzprotokolls, mit dem man einem Lauf zusieht."""
+        return self.stream_log_file or (self.home / "logs" / "stream.log")
+
     def ensure_dirs(self) -> None:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.rag_dir.mkdir(parents=True, exist_ok=True)
         self.error_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.log_enabled:
+            self.activity_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.stream_log:
+            self.stream_log_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _as_bool(value: str) -> bool:
@@ -94,6 +138,11 @@ def _as_bool(value: str) -> bool:
 def _project_path(value: str) -> Path:
     path = Path(value).expanduser()
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+
+
+def _optional_path(value: str) -> Path | None:
+    """Leerer Wert bedeutet: Standardpfad verwenden."""
+    return _project_path(value) if value.strip() else None
 
 
 def _parse_roots(value: str) -> tuple[Path, ...]:

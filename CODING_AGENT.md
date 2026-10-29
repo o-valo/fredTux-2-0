@@ -2,7 +2,7 @@
 
 ## Arbeitsweise
 
-1. **Vor jeder Coding-Aufgabe** zuerst den aktuellen Projektstand und vorhandene Dateien prüfen.
+1. **Vor jeder Coding-Aufgabe** zuerst ins RAG sehen (`list_knowledge`, dann `search_knowledge`) – den Weg dorthin nennt der Systemüberblick in `SYSTEM.md` – und danach den aktuellen Projektstand prüfen; nicht im Home-Verzeichnis stöbern.
 2. **Bevor ein Tool erstellt wird**, immer `search_knowledge` und anschließend `list_knowledge` verwenden. Wenn ein passendes Tool bereits existiert, muss es wiederverwendet und nicht neu erfunden werden.
 3. **Ein Werkzeug pro Schritt:** Keine langen Ketten von Folgeaufrufern erzeugen. Ein Tool-Aufruf, ein Ergebnis, dann die nächste bewusste Aktion.
 4. **Bei jeder Fehlermeldung sofort auswerten.** Nicht denselben Aufruf wiederholen. Bei unbekanntem Pfad, falscher URL oder fehlendem Tool eine korrigierte, strukturierte Alternative verwenden.

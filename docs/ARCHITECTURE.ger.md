@@ -9,6 +9,13 @@
 Liest die Laufzeitkonfiguration aus Umgebungsvariablen und legt die Datenverzeichnisse
 an. `FREDTUX_HOME` ist die einzige zentrale Laufzeitwurzel.
 
+### `fredtux.activitylog.ActivityLog`
+
+Schreibt den normalen Ablauf als JSON Lines (Anfrage, Modellrunden, Werkzeugaufrufe,
+Dauern) und ist über `FREDTUX_LOG` schaltbar. Getrennt vom Fehlerlog, weil Fehler
+auch bei ausgeschaltetem Aktivitätsprotokoll erhalten bleiben müssen. Ein
+Schreibfehler beendet nie eine Anfrage.
+
 ### `fredtux.llm.LLMClient`
 
 Kapselt zwei Rollen:
@@ -31,8 +38,8 @@ keine Authentifizierung oder CORS-Policy.
 ### `fredtux.core.AgentCore`
 
 Hält den Systemprompt, die Nachrichtenhistorie, den Session-Speicher und die
-Tool-Registry. Der Systemprompt lädt `CODING_AGENT.md` mit den verbindlichen
-Anti-Loop- und Coding-Regeln. Nach einer Tool-Antwort wird die nächste LLM-Anfrage
+Tool-Registry. Der Systemprompt lädt den Systemüberblick aus `SYSTEM.md` und
+`CODING_AGENT.md` mit den verbindlichen Anti-Loop- und Coding-Regeln. Nach einer Tool-Antwort wird die nächste LLM-Anfrage
 ausgeführt; die Schleifengrenzen `FREDTUX_MAX_IDLE_ROUNDS` und `FREDTUX_MAX_TOTAL_ROUNDS`
 verhindern Endlosschleifen.
 

@@ -15,6 +15,23 @@ class LLMError(RuntimeError):
     """Raised when the configured model endpoint cannot answer."""
 
 
+REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
+
+
+def _reasoning_of(message: dict[str, Any]) -> str:
+    """Holt die Denkausgabe aus einer Nachricht, egal wie der Server sie nennt."""
+    for feld in REASONING_FIELDS:
+        wert = message.get(feld)
+        if isinstance(wert, str) and wert:
+            return wert
+        if isinstance(wert, list):  # manche Server schicken Blöcke statt Text
+            teile = [str(t.get("text", "")) if isinstance(t, dict) else str(t) for t in wert]
+            zusammen = "".join(teile)
+            if zusammen:
+                return zusammen
+    return ""
+
+
 class OllamaError(RuntimeError):
     """Raised when the local Ollama installation cannot be verified."""
 
@@ -140,11 +157,23 @@ class LLMClient:
         except OSError as exc:
             raise LLMError(f"Verbindung zu {self.config.base_url} fehlgeschlagen: {exc}") from exc
 
+    def _payload_options(self) -> dict[str, Any]:
+        """Gibt serverseitige Inferenz-Optionen mit, falls konfiguriert.
+
+        Ohne num_ctx nutzt Ollama seinen eigenen Default (oft 32k), wodurch
+        längere Sessions mit HTTP 400 'exceeds the available context size'
+        abbrechen. FREDTUX_NUM_CTX > 0 hebt das serverseitige Limit an.
+        """
+        if self.config.num_ctx <= 0:
+            return {}
+        return {"options": {"num_ctx": self.config.num_ctx}}
+
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "stream": False,
+            **self._payload_options(),
         }
         if tools:
             payload["tools"] = tools
@@ -159,7 +188,11 @@ class LLMClient:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
             message = result["choices"][0]["message"]
-            return {"content": message.get("content") or "", "tool_calls": message.get("tool_calls", [])}
+            return {
+                "content": message.get("content") or "",
+                "reasoning": _reasoning_of(message),
+                "tool_calls": message.get("tool_calls", []),
+            }
         except urllib.error.HTTPError as exc:
             raise LLMError(self._http_message(url, exc)) from exc
         except TimeoutError as exc:
@@ -179,6 +212,7 @@ class LLMClient:
             "model": self.config.model,
             "messages": messages,
             "stream": True,
+            **self._payload_options(),
         }
         if tools:
             payload["tools"] = tools
@@ -207,6 +241,13 @@ class LLMClient:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
+                    # Denkausgabe zuerst: Modelle mit Reasoning (z. B. Qwen3 mit
+                    # aktiviertem Denken) schicken sie unter reasoning_content,
+                    # manche Server unter reasoning oder thinking. Sie wird
+                    # mitgereicht, damit man dem Lauf zusehen kann.
+                    reasoning = _reasoning_of(delta)
+                    if reasoning:
+                        yield {"type": "reasoning", "content": reasoning}
                     content = delta.get("content")
                     if content:
                         content_parts.append(str(content))
