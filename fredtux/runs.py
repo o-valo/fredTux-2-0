@@ -24,6 +24,7 @@ class Run:
         self._parts: list[str] = []
         self._lock = threading.Lock()
         self._done = threading.Event()
+        self._cancel = threading.Event()
 
     def append(self, text: str) -> None:
         if not text:
@@ -46,6 +47,19 @@ class Run:
     def age(self) -> int:
         return int(time.monotonic() - self.started)
 
+    def cancel(self) -> None:
+        """Bittet den Lauf abzubrechen – was bis dahin geantwortet wurde, bleibt stehen.
+
+        Abgebrochen wird zwischen zwei Stücken, nicht mitten im Modellaufruf: der
+        Aufruf selbst ist nicht unterbrechbar, das nächste Stück aber wird nicht
+        mehr angefordert.
+        """
+        self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
     def finish(self) -> None:
         self._done.set()
 
@@ -54,7 +68,12 @@ class Run:
         return self._done.wait(timeout)
 
     def describe(self) -> str:
-        zustand = "fertig" if self.finished else "läuft"
+        if self.finished:
+            zustand = "fertig"
+        elif self.cancelled:
+            zustand = "wird abgebrochen"
+        else:
+            zustand = "läuft"
         text = f"{self.session_id}: {zustand} seit {self.age()} s, {self.chars()} Zeichen"
         if self.client and self.client != "-":
             text += f", Client {self.client}"

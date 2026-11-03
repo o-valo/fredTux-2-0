@@ -26,9 +26,14 @@ Keep a Changelog and the project uses semantic versioning.
   `FREDTUX_HOME/sessions/` liegen, der Standard-Agent startet mit leerem
   Kontext, und die Antwort nennt die neue Sitzungs-ID (die auch als
   `session_id` oder `X-FredTux-Session-ID` weiterverwendet werden kann). Läuft
-  in der Sitzung gerade ein Lauf, wird **nicht** umgeschaltet – die Meldung
-  nennt Grund und Dauer, damit keine Nachrichten im neuen Verlauf landen.
-  Damit lässt sich der Kontext zurücksetzen, ohne den Dienst neu zu starten.
+  in der Sitzung gerade ein Lauf, wird er **abgebrochen** – wie `/new` in der
+  CLI wird nicht gewartet, bis das Modell fertig ist. Der Lauf endet mit einem
+  Hinweis im Stream und schreibt seine letzten Zeilen in die alte Sitzung; der
+  Standardplatz bekommt dafür ein frisches Agenten-Objekt, damit alter und neuer
+  Verlauf nicht am selben Objekt hängen. Der Abbruch greift am nächsten Stück
+  des Streams – steht der Modellserver noch im Prefill, belegt der alte Lauf den
+  Laufplatz bis dahin weiter. Der Verlauf ist trotzdem sofort neu. Damit lässt
+  sich der Kontext zurücksetzen, ohne den Dienst neu zu starten.
 - **`screen:-rm <Sitzung> …` löscht abgeschlossene Sitzungen** samt
   `.json`-Sidecar, mehrere IDs durch Leerzeichen oder Komma getrennt. Die eigene
   Sitzung, der Standardverlauf und laufende Sitzungen bleiben unangetastet – die

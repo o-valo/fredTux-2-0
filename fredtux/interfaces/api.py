@@ -154,6 +154,14 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
                         else agent.ask_stream(user_text)
                     )
                     for chunk in strom:
+                        if lauf.cancelled:
+                            abbruch = (
+                                "\n\n[abgebrochen durch screen:-new – diese Antwort bis "
+                                f"hierher gehört noch zu {active_session}]"
+                            )
+                            lauf.append(abbruch)
+                            self._send_sse_chunk(completion_id, active_session, content=abbruch)
+                            break
                         chunks += 1
                         lauf.append(chunk)
                         self._send_sse_chunk(completion_id, active_session, content=chunk)
@@ -308,7 +316,7 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
         "  screen:-r <Sitzung>    An eine bestimmte Sitzung hängen\n"
         "  screen:-a              An den gerade laufenden Lauf hängen (ohne ID)\n"
         "  screen:-d              Zustand der eigenen Sitzung samt Erklärung\n"
-        "  screen:-new            Neue Sitzung beginnen, Verlauf bleibt als Datei\n"
+        "  screen:-new            Neue Sitzung beginnen; ein laufender Lauf wird abgebrochen\n"
         "  screen:-rm <Sitzung>    Sitzung löschen (nicht die eigene, nicht laufende)\n"
         "Diese Befehle erreichen das Modell nicht und belegen keinen Laufplatz.\n"
         "Ein Backslash davor (\\screen:-ls) schaltet die Sonderbedeutung ab."
@@ -405,23 +413,34 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _screen_new(self, session_id: str | None) -> str:
-        """Beginnt eine neue Sitzung – der alte Verlauf bleibt als Datei liegen.
+        """Beginnt eine neue Sitzung – wie ``/new`` in der CLI, ohne Warten.
 
         Ohne ``session_id`` arbeitet FredTux mit dem Standard-Agenten; genau der
         wird hier umgeschaltet, damit die nächste Anfrage wirklich leer beginnt.
-        Läuft in dieser Sitzung gerade ein Lauf, wird **nicht** umgeschaltet –
-        sonst landeten dessen Nachrichten im neuen Verlauf.
+        Ein Lauf, der gerade in dieser Sitzung rechnet, wird **abgebrochen** statt
+        abgewartet: er hat seine Sitzung, die neue ist leer. Seine letzten Zeilen
+        landen noch in der alten Sitzung – dort, wohin sie gehören.
         """
         agent = self.server.default_agent
         alt = getattr(agent, "session_id", "-")
         lauf = self.server.runs.get(alt)
-        if lauf is not None and not lauf.finished:
-            return (
-                f"Sitzung {alt} rechnet noch ({lauf.age()} s, {lauf.chars()} Zeichen). "
-                "Nicht umgeschaltet – nach dem Ende noch einmal screen:-new."
+        laeuft = lauf is not None and not lauf.finished
+        abbruch = ""
+        if lauf is not None and laeuft:
+            lauf.cancel()
+            abbruch = (
+                f"Abgebrochen: der Lauf auf {alt} rechnete seit {lauf.age()} s "
+                f"({lauf.chars()} Zeichen bis dahin) – seine Antwort endet dort. "
+                "Der Abbruch greift am nächsten Stück des Streams; solange das Modell "
+                "noch im Prefill steht, belegt der alte Lauf den Laufplatz weiter "
+                "(neue Anfragen warten so lange in der Warteschlange)."
             )
-        umschalten = getattr(agent, "new_session", None)
-        neu = umschalten() if callable(umschalten) else self._new_session_id(agent)
+        # Solange der alte Lauf noch auf dem bisherigen Objekt rechnet, bekommt
+        # der Standardplatz ein frisches Objekt: sonst tauschte new_session()
+        # dem Lauf den Verlauf unter den Füßen aus.
+        neu = (
+            self._fresh_agent() if laeuft else self._new_session_id(agent)
+        )
         hinweis = ""
         if session_id and session_id != alt:
             hinweis = (
@@ -432,9 +451,10 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
         return (
             f"Neue Sitzung: {neu}\n"
             f"Vorher: {alt} (bleibt als Datei in {self.server.config.sessions_dir}).\n"
-            "Der Verlauf beginnt leer.\n"
-            f'Folgeanfragen: "session_id": "{neu}" oder Header X-FredTux-Session-ID – '
-            "ohne Angabe landet die nächste Anfrage in dieser neuen Sitzung."
+            + (f"{abbruch}\n" if abbruch else "")
+            + "Der Verlauf beginnt leer.\n"
+            + f'Folgeanfragen: "session_id": "{neu}" oder Header X-FredTux-Session-ID – '
+            + "ohne Angabe landet die nächste Anfrage in dieser neuen Sitzung."
             + hinweis
         )
 
@@ -482,11 +502,39 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
         return "\n".join(zeilen)
 
     def _new_session_id(self, agent: Any) -> str:
-        """Ersatz, wenn der Agent kein ``new_session`` kann (Test-Agenten)."""
-        neu = datetime.now(timezone.utc).strftime("session-%Y%m%d-%H%M%S-%f")
+        """Setzt den Standard-Agenten auf eine neue, leere Sitzung.
+
+        Kann der Agent ``new_session``, macht er es selbst – er kennt seine
+        Sitzungsdatei. Ein Agent ohne diese Fähigkeit (Test-Doubles) bekommt eine
+        neue ID und einen leeren Verlauf.
+        """
+        umschalten = getattr(agent, "new_session", None)
+        if callable(umschalten):
+            return umschalten()
+        neu = self._session_id()
         agent.session_id = neu
         agent.history = []
         return neu
+
+    @staticmethod
+    def _session_id() -> str:
+        return datetime.now(timezone.utc).strftime("session-%Y%m%d-%H%M%S-%f")
+
+    def _fresh_agent(self) -> str:
+        """Ersetzt den Standard-Agenten durch ein neues, leeres Objekt.
+
+        Nötig, solange ein alter Lauf noch auf dem bisherigen Objekt rechnet:
+        ein ``new_session()`` darauf würde dessen Verlauf mitten im Lauf
+        austauschen, und seine restlichen Nachrichten landeten im neuen Verlauf.
+        """
+        alt = self.server.default_agent
+        neu = self._session_id()
+        try:
+            agent = self.server.agent_factory(neu)
+        except Exception:  # Test-Doubles ohne echte Fabrik.
+            return self._new_session_id(alt)
+        self.server.default_agent = agent
+        return getattr(agent, "session_id", neu)
 
     def _last_stored_answer(self, session_id: str) -> str | None:
         """Letzte gespeicherte Antwort einer Sitzung; ``None`` = Sitzung unbekannt."""

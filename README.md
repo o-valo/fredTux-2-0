@@ -391,7 +391,7 @@ possible from any client that just sends text (curl, OpenWebUI, Ollama app).
 | `screen:-r [session]` | attach to a run and wait for its result |
 | `screen:-a` | attach to the currently running run (no ID needed) |
 | `screen:-d` | state of the own session, with an explanation |
-| `screen:-new` | start a new session; the old history stays on disk |
+| `screen:-new` | start a new session; a running run is aborted, the old history stays on disk |
 | `screen:-rm <session> …` | delete finished sessions (never the own, never a running one) |
 
 A leading backslash (`\screen:-ls`) disables the special meaning and sends the

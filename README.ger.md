@@ -394,7 +394,7 @@ in jedem Client verwalten, der einfach Text schickt (curl, OpenWebUI, Ollama-App
 | `screen:-r [Sitzung]` | an einen Lauf hängen und auf das Ergebnis warten |
 | `screen:-a` | an den gerade laufenden Lauf hängen (ohne ID) |
 | `screen:-d` | Zustand der eigenen Sitzung samt Erklärung |
-| `screen:-new` | neue Sitzung beginnen, der alte Verlauf bleibt als Datei liegen |
+| `screen:-new` | neue Sitzung beginnen, ein laufender Lauf wird abgebrochen, der alte Verlauf bleibt als Datei liegen |
 | `screen:-rm <Sitzung> …` | abgeschlossene Sitzungen löschen (nicht die eigene, nicht laufende) |
 
 Ein Backslash davor (`\screen:-ls`) hebt die Sonderbedeutung auf und schickt den

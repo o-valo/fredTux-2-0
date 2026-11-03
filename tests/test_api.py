@@ -60,6 +60,15 @@ class SlowAgent(FakeAgent):
         yield f"Antwort auf: {text}"
 
 
+class TrickleAgent(FakeAgent):
+    """Liefert viele kleine Stücke – lang genug, um mittendrin abzubrechen."""
+
+    def ask_stream(self, text, events=None):
+        for nummer in range(40):
+            time.sleep(0.05)
+            yield f"{nummer} "
+
+
 class ServerTestCase(unittest.TestCase):
     """Startet einen echten Server auf einem freien Port – gemeinsam für alle Gruppen."""
 
@@ -396,7 +405,7 @@ class ScreenCommandTests(ServerTestCase):
         antwort = self._text(server, "screen:-rm ../../etc/passwd")
         self.assertIn("nicht gelöscht", antwort)
 
-    def test_new_is_refused_while_a_run_is_active(self):
+    def test_new_interrupts_a_running_run_instead_of_waiting(self):
         agent = SlowAgent(delay=0.8)
         server = self._start_server(agent=agent)
         laeufer = threading.Thread(
@@ -408,8 +417,37 @@ class ScreenCommandTests(ServerTestCase):
         time.sleep(0.2)
         antwort = self._text(server, "screen:-new")
         laeufer.join(timeout=15)
-        self.assertIn("rechnet noch", antwort)
+        self.assertIn("Neue Sitzung:", antwort)
+        self.assertIn("Abgebrochen: der Lauf auf api-test-session", antwort)
+        # Der Standardplatz ist ein frisches Objekt, der alte Lauf behält seines.
+        self.assertNotEqual(server.default_agent.session_id, "api-test-session")
         self.assertEqual(agent.session_id, "api-test-session")
+
+    def test_new_without_a_run_does_not_talk_about_aborting(self):
+        server = self._start_server(agent=FakeAgent())
+        self.assertNotIn("Abgebrochen", self._text(server, "screen:-new"))
+
+    def test_new_cancels_a_streaming_run_at_the_next_chunk(self):
+        server = self._start_server(agent=TrickleAgent())
+        ergebnis = {}
+
+        def lauf():
+            ergebnis["body"] = self._post(
+                server,
+                {
+                    "model": "fredtux-2-0",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hallo"}],
+                },
+            )[2].decode()
+
+        laeufer = threading.Thread(target=lauf)
+        laeufer.start()
+        time.sleep(0.3)
+        antwort = self._text(server, "screen:-new")
+        laeufer.join(timeout=15)
+        self.assertIn("Abgebrochen", antwort)
+        self.assertIn("abgebrochen durch screen:-new", ergebnis["body"])
 
 
 if __name__ == "__main__":
