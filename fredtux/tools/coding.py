@@ -218,13 +218,20 @@ class StructuredCommandRunner:
                     stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE if options["stderr"] == "capture" else subprocess.DEVNULL,
-                    text=True,
+                    # Bytes statt text=True: sonst wirft eine Binaerausgabe (z. B.
+                    # gzip von curl) einen UnicodeDecodeError und die ganze
+                    # Pipeline ist verloren. Dekodiert wird tolerant danach.
                     env=self.shell_tools._safe_env(),
                 )
             except OSError as exc:
                 raise CodingCommandError(f"Start von {argv[0]!r} fehlgeschlagen: {exc}") from exc
             try:
-                stdout, step_stderr = process.communicate(input=input_text, timeout=self.timeout)
+                raw_stdout, raw_stderr = process.communicate(
+                    input=input_text.encode("utf-8") if input_text is not None else None,
+                    timeout=self.timeout,
+                )
+                stdout = self.shell_tools._decode(raw_stdout)
+                step_stderr = self.shell_tools._decode(raw_stderr)
                 if step_stderr:
                     stderr_parts.append(step_stderr)
             except subprocess.TimeoutExpired as exc:

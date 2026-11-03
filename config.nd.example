@@ -28,6 +28,7 @@ FREDTUX_CODING_TIMEOUT=300
 # total = harte Obergrenze aller Runden (Sicherheitsnetz gegen Endlosschleifen).
 FREDTUX_MAX_IDLE_ROUNDS=6
 FREDTUX_MAX_TOTAL_ROUNDS=40
+FREDTUX_MAX_REPEAT_CALLS=3
 
 # Context-Fenster und Werkzeugergebnisse (neu in 0.6.0)
 # Ohne FREDTUX_NUM_CTX nutzt Ollama seinen eigenen Default (häufig 32768). Bei

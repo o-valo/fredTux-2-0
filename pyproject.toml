@@ -1,6 +1,6 @@
 [project]
 name = "fredtux-2.0"
-version = "0.6.0"
+version = "0.6.2"
 description = "Modular local agent harness"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import Config
-from .compaction import Compactor
+from .compaction import Compactor, TEMPLATE_RESERVE_TOKENS, TOOL_JSON_CHARS_PER_TOKEN
 from .activitylog import ActivityLog, elapsed_ms
 from .errorlog import ErrorLog
 from .streamlog import StreamLog
@@ -84,6 +85,16 @@ class AgentCore:
             "execute_command ist nur die eingeschränkte Kompatibilitäts-API. "
             "Führe keine nicht angeforderten Systemänderungen aus."
         ]
+        # Ohne diese Pfade raet das Modell Schreibziele (/tmp, /app) und
+        # Dateinamen fuer Wissensdateien und laeuft in drei Fehlschlaege
+        # hintereinander, bis die Werkzeugschleife abbricht.
+        parts.append(
+            f"Arbeitsverzeichnis: {self.config.shell_root} – ein Dateiname ohne "
+            f"Verzeichnis gilt von dort. Schreiben nur unter {self.config.shell_write_root}. "
+            f"Wissensdateien liegen in {self.config.rag_dir} "
+            "(list_knowledge, search_knowledge, read_file); Pfade wie /tmp oder /app "
+            "werden abgelehnt."
+        )
         if briefing:
             parts.append(f"Systemüberblick ({self.briefing_path.name}):\n{briefing}")
         if rules:
@@ -173,12 +184,13 @@ class AgentCore:
         total_rounds = 0
         idle_rounds = 0
         last_call = ""
+        repeat_state: dict[str, Any] = {}
         while True:
             total_rounds += 1
             made_progress = False
             content_parts: list[str] = []
             completion: dict[str, Any] | None = None
-            self._compact_if_needed()
+            self._prepare_context(text, events)
             self._trace(
                 f"[Runde {total_rounds}] {self.config.model}: "
                 f"{len(self.history)} Nachrichten im Kontext",
@@ -258,8 +270,10 @@ class AgentCore:
                 )
                 if failed:
                     self._log_error("tool", f"{name}: {result}", arguments)
+                    repeat_count = 0
                 else:
-                    made_progress = True
+                    repeat_count = self._count_repeat(name, arguments, result, repeat_state)
+                    made_progress = repeat_count == 1
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
@@ -278,6 +292,14 @@ class AgentCore:
                         rounds=total_rounds, duration_ms=elapsed_ms(started),
                     )
                     yield loop_error[0]
+                    return
+                wiederholung = self._repeat_loop_error(name, repeat_count)
+                if wiederholung:
+                    self.activity.event(
+                        "request.end", self.session_id, stream=True, status="tool_repeat",
+                        rounds=total_rounds, duration_ms=elapsed_ms(started),
+                    )
+                    yield wiederholung
                     return
             idle_rounds = 0 if made_progress else idle_rounds + 1
             if total_rounds >= self.config.max_total_rounds or idle_rounds >= self.config.max_idle_rounds:
@@ -303,10 +325,11 @@ class AgentCore:
         total_rounds = 0
         idle_rounds = 0
         last_call = ""
+        repeat_state: dict[str, Any] = {}
         while True:
             total_rounds += 1
             made_progress = False
-            self._compact_if_needed()
+            self._prepare_context(text)
             self._trace(
                 f"[Runde {total_rounds}] {self.config.model}: "
                 f"{len(self.history)} Nachrichten im Kontext"
@@ -367,8 +390,10 @@ class AgentCore:
                 )
                 if failed:
                     self._log_error("tool", f"{name}: {result}", arguments)
+                    repeat_count = 0
                 else:
-                    made_progress = True
+                    repeat_count = self._count_repeat(name, arguments, result, repeat_state)
+                    made_progress = repeat_count == 1
                 tool_message = {"role": "tool", "tool_call_id": call.get("id", ""), "name": name, "content": result}
                 self.history.append(tool_message)
                 self.sessions.append_message(self.session_id, tool_message)
@@ -381,6 +406,13 @@ class AgentCore:
                         rounds=total_rounds, duration_ms=elapsed_ms(started),
                     )
                     return loop_error
+                wiederholung = self._repeat_loop_error(name, repeat_count)
+                if wiederholung:
+                    self.activity.event(
+                        "request.end", self.session_id, status="tool_repeat",
+                        rounds=total_rounds, duration_ms=elapsed_ms(started),
+                    )
+                    return wiederholung
             idle_rounds = 0 if made_progress else idle_rounds + 1
             if total_rounds >= self.config.max_total_rounds or idle_rounds >= self.config.max_idle_rounds:
                 break
@@ -391,6 +423,73 @@ class AgentCore:
             rounds=total_rounds, duration_ms=elapsed_ms(started),
         )
         return f"FEHLER: {diagnostics}"
+
+    def _context_overhead(self) -> int:
+        """Tokens im Fenster, die nicht zur Historie gehoeren.
+
+        Werkzeugdeklarationen und der Vorlagenrahmen gehen bei jeder Anfrage mit
+        und zaehlen deshalb gegen dasselbe Fenster. Wer sie ignoriert, plant mit
+        einem Budget, das es nicht gibt – genau so entstand der 500er.
+        """
+        schemas = self.tools.schemas()
+        chars = len(json.dumps(schemas, ensure_ascii=False)) if schemas else 0
+        return int(chars / TOOL_JSON_CHARS_PER_TOKEN) + TEMPLATE_RESERVE_TOKENS
+
+    def _prepare_context(
+        self, text: str, events: Callable[[dict[str, Any]], None] | None = None
+    ) -> None:
+        """Bringt die Nachrichtenliste vor jeder Runde ins Context-Fenster.
+
+        Drei Schritte in dieser Reihenfolge: aeltere Runden verdichten, die
+        laufende Frage sichern, dann hart kuerzen, bis die Liste samt Ueberhang
+        passt. Ohne den dritten Schritt schneidet der Modellserver selbst von
+        vorne ab – und die Frage ist weg.
+        """
+        self._compact_if_needed()
+        self._ensure_user_query(text)
+        self._fit_context(self._context_overhead(), events)
+
+    @staticmethod
+    def _is_user_query(message: dict[str, Any]) -> bool:
+        """Zaehlt eine Nachricht fuer die Chat-Vorlage als Frage?
+
+        Die Qwen-Vorlage ueberspringt ``user``-Nachrichten, die komplett in
+        ``<tool_response>`` stehen – sie gelten dort als Werkzeugantwort. Wer
+        nur auf die Rolle schaut, haelt so eine Liste faelschlich fuer in
+        Ordnung.
+        """
+        if message.get("role") != "user":
+            return False
+        content = message.get("content")
+        if not isinstance(content, str):
+            return True  # Inhalt als Teilliste (z. B. Bilder) ist eine Frage.
+        stripped = content.strip()
+        return not (
+            stripped.startswith("<tool_response>") and stripped.endswith("</tool_response>")
+        )
+
+    def _ensure_user_query(self, text: str) -> None:
+        """Sichert die Anforderung der Chat-Vorlage: es muss eine Frage im Kontext stehen.
+
+        Die Qwen3-Vorlage bricht mit HTTP 500 ("No user query found in
+        messages.") ab, sobald keine echte Frage mehr in der Liste steht – sei
+        es, weil die Verdichtung sie mitgenommen hat, sei es, weil der Server
+        wegen Ueberlaenge von vorne abgeschnitten hat. Deshalb wird die laufende
+        Frage hier geprueft und - falls noetig - erneut eingesetzt; jeder Fall
+        landet im Protokoll, damit die Ursache sichtbar bleibt, statt still zu
+        heilen.
+        """
+        if any(self._is_user_query(message) for message in self.history):
+            return
+        message = {"role": "user", "content": text}
+        self.history.append(message)
+        self.sessions.append_message(self.session_id, message)
+        self._trace("[Kontext] Benutzerfrage fehlte im Kontext – erneut eingesetzt")
+        self._log_error(
+            "context",
+            "Keine user-Nachricht im Kontext; laufende Frage erneut eingesetzt "
+            f"({len(self.history)} Nachrichten).",
+        )
 
     def _compact_if_needed(self) -> None:
         """Verdichtet die Historie, bevor sie das Context-Fenster sprengt.
@@ -410,6 +509,34 @@ class AgentCore:
                 f"ca. {self.compactor.estimate_tokens(self.history)} Tokens.",
             )
 
+    def _fit_context(
+        self, overhead: int, events: Callable[[dict[str, Any]], None] | None = None
+    ) -> None:
+        """Kuerzt ueberlange Nachrichten, bis die Anfrage wieder ins Fenster passt."""
+        budget = self.compactor.budget(overhead)
+        before = self.compactor.estimate_tokens(self.history)
+        if before <= budget:
+            return
+        nachrichten = len(self.history)
+        gekuerzt, saved = self.compactor.fit_context(self.history, overhead)
+        if saved <= 0 and len(gekuerzt) == nachrichten:
+            return
+        self.history = gekuerzt
+        after = self.compactor.estimate_tokens(self.history)
+        entfernt = nachrichten - len(self.history)
+        teile = [f"{saved} Zeichen gekuerzt"] if saved else []
+        if entfernt:
+            teile.append(f"{entfernt} Nachricht(en) aus dem Kontext genommen")
+        meldung = (
+            f"[Kontext] Fenster gefuellt: {', '.join(teile)}, ca. {before} auf {after} "
+            f"Tokens (Budget {budget}, Werkzeuge {overhead}) – die Frage des Nutzers bleibt"
+        )
+        self.streamlog.line(meldung)
+        if events is not None:
+            events({"type": "reasoning", "content": f"{meldung}\n"})
+        self._trace(meldung)
+        self._log_error("context", meldung)
+
     def _loop_diagnostics(self, total_rounds: int, idle_rounds: int, last_call: str) -> str:
         return (
             "Maximale Anzahl von Werkzeugschleifen erreicht. "
@@ -420,6 +547,43 @@ class AgentCore:
 
     def _log_error(self, category: str, message: str, context: str = "") -> None:
         self.error_log.write(category, f"{message} | args={context}", self.session_id)
+
+    def _count_repeat(
+        self, name: str, arguments: str, result: str, state: dict[str, Any]
+    ) -> int:
+        """Zaehlt, wie oft derselbe Aufruf hintereinander dieselbe Antwort liefert.
+
+        Ein erfolgreicher Werkzeugaufruf ist nicht automatisch Fortschritt: wer
+        dreimal dieselbe Datei liest, bekommt dreimal denselben Text. Erst eine
+        *neue* Antwort bringt den Lauf weiter – und nur die zaehlt als
+        Fortschritt, damit die Idle-Bremse ueberhaupt greifen kann.
+        """
+        digest = hashlib.sha1(str(result).encode("utf-8", "replace")).hexdigest()
+        fingerprint = (name, arguments, digest)
+        if state.get("key") == fingerprint:
+            state["count"] = int(state.get("count", 1)) + 1
+        else:
+            state["key"] = fingerprint
+            state["count"] = 1
+        return int(state["count"])
+
+    def _repeat_loop_error(self, name: str, count: int) -> str | None:
+        """Bricht ab, wenn ein Aufruf immer wieder dieselbe Antwort liefert."""
+        if count < self.config.max_repeat_calls:
+            return None
+        content = (
+            f"FEHLER: Das Werkzeug {name!r} hat {count}-mal hintereinander mit denselben "
+            "Parametern dieselbe Antwort geliefert. Der Lauf dreht sich im Kreis und gewinnt "
+            "keine neue Information mehr. Bitte korrigiere den Aufruf oder gib eine neue Anweisung."
+        )
+        assistant_message = {"role": "assistant", "content": content}
+        self.history.append(assistant_message)
+        self.sessions.append_message(self.session_id, assistant_message)
+        self._log_error(
+            "tool_loop",
+            f"Wiederholung ohne neue Information: {name} {count}x mit identischem Ergebnis.",
+        )
+        return content
 
     def _tool_loop_error(
         self,

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fredtux.config import Config
 from fredtux.interfaces.api import create_server
+from fredtux.llm import LLMError
 
 
 class FakeAgent:
@@ -33,6 +34,14 @@ class ReasoningAgent(FakeAgent):
         yield f"Antwort auf: {text}"
 
 
+class FailingAgent(FakeAgent):
+    """Liefert ein Stück Antwort und bricht dann ab – wie ein Modellfehler mitten im Lauf."""
+
+    def ask_stream(self, text, events=None):
+        yield "halbe Antwort"
+        raise LLMError("LLM-Endpunkt http://unused/v1 antwortete mit HTTP 500: Overloaded")
+
+
 class SlowAgent(FakeAgent):
     """Antwortet erst nach ``delay`` Sekunden und zählt die Läufe."""
 
@@ -51,7 +60,9 @@ class SlowAgent(FakeAgent):
         yield f"Antwort auf: {text}"
 
 
-class ApiTests(unittest.TestCase):
+class ServerTestCase(unittest.TestCase):
+    """Startet einen echten Server auf einem freien Port – gemeinsam für alle Gruppen."""
+
     def setUp(self):
         root = Path(tempfile.mkdtemp())
         self.config = Config(home=root, base_url="http://unused/v1", model="llm-bahnhof", api_key=None)
@@ -89,6 +100,8 @@ class ApiTests(unittest.TestCase):
         host, port = self.server.server_address[:2]
         return f"http://{host}:{port}{path}"
 
+
+class ApiTests(ServerTestCase):
     def test_health_and_models_are_openai_compatible(self):
         with urllib.request.urlopen(self.url("/health"), timeout=2) as response:
             health = json.loads(response.read())
@@ -209,6 +222,29 @@ class ApiTests(unittest.TestCase):
         time.sleep(1.0)
         self.assertEqual(agent.calls, 0)
 
+    def test_streaming_abort_is_visible_in_the_chat(self):
+        """Ein Abbruch mitten im Stream darf nicht stumm enden. Der Client hat den
+        Status 200 längst; ohne Inhaltsteil sähe der Chat aus, als wäre nichts passiert."""
+        server = self._start_server(agent=FailingAgent())
+        payload = {
+            "model": "fredtux-2-0",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Hallo"}],
+        }
+        status, _, body = self._post(server, payload)
+        text = body.decode()
+        events = [json.loads(zeile[6:]) for zeile in text.splitlines() if zeile.startswith("data: {")]
+        self.assertEqual(status, 200)
+        inhalt = "".join(
+            e["choices"][0]["delta"].get("content") or "" for e in events if e.get("choices")
+        )
+        self.assertIn("halbe Antwort", inhalt)
+        self.assertIn("Lauf abgebrochen", inhalt)
+        self.assertIn("HTTP 500", inhalt)
+        self.assertEqual([e for e in events if e.get("choices")][-1]["choices"][0]["finish_reason"], "stop")
+        self.assertTrue(any("fredtux_error" in json.dumps(e) for e in events))
+        self.assertIn("data: [DONE]", text)
+
     def test_streaming_queue_timeout_reports_sse_error(self):
         agent = SlowAgent(delay=1.5)
         server = self._start_server(replace(self.config, queue_timeout=0.2), agent)
@@ -228,6 +264,152 @@ class ApiTests(unittest.TestCase):
         self.assertIn("fredtux_error", text)
         self.assertIn("FREDTUX_QUEUE_TIMEOUT", text)
         self.assertIn("data: [DONE]", text)
+
+
+class ScreenCommandTests(ServerTestCase):
+    """``screen:``-Befehle: reiner Text, abgefangen vor dem Laufplatz."""
+
+    def _text(self, server, inhalt, timeout=15):
+        status, _, body = self._post(
+            server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": inhalt}]},
+            timeout=timeout,
+        )
+        self.assertEqual(status, 200)
+        return json.loads(body)["choices"][0]["message"]["content"]
+
+    def test_command_does_not_reach_the_model(self):
+        agent = SlowAgent()
+        server = self._start_server(agent=agent)
+        antwort = self._text(server, "screen:-ls")
+        self.assertIn("Läuft:", antwort)
+        self.assertIn("Sitzungen:", antwort)
+        self.assertEqual(agent.calls, 0)
+
+    def test_unknown_command_shows_help(self):
+        agent = SlowAgent()
+        server = self._start_server(agent=agent)
+        self.assertIn("screen:-r", self._text(server, "screen:quatsch"))
+        self.assertEqual(agent.calls, 0)
+
+    def test_backslash_sends_the_command_to_the_model(self):
+        agent = SlowAgent()
+        server = self._start_server(agent=agent)
+        antwort = self._text(server, "\\screen:-ls")
+        self.assertEqual(antwort, "Antwort auf: screen:-ls")
+        self.assertEqual(agent.calls, 1)
+
+    def test_attach_waits_for_the_running_run_without_a_second_run(self):
+        agent = SlowAgent(delay=0.8)
+        server = self._start_server(agent=agent)
+        laeufer = threading.Thread(
+            target=lambda: self._post(
+                server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": "Hallo"}]}
+            )
+        )
+        laeufer.start()
+        time.sleep(0.2)  # der Lauf rechnet, der Client hängt daran
+        antwort = self._text(server, "screen:-r")
+        laeufer.join(timeout=15)
+        self.assertIn("angehängt an api-test-session", antwort)
+        self.assertIn("Antwort auf: Hallo", antwort)
+        self.assertEqual(agent.calls, 1)  # angehängt, nicht neu gestartet
+
+    def test_list_shows_the_running_run(self):
+        agent = SlowAgent(delay=0.8)
+        server = self._start_server(agent=agent)
+        laeufer = threading.Thread(
+            target=lambda: self._post(
+                server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": "Hallo"}]}
+            )
+        )
+        laeufer.start()
+        time.sleep(0.2)
+        antwort = self._text(server, "screen:-ls")
+        laeufer.join(timeout=15)
+        self.assertIn("api-test-session: läuft", antwort)
+
+    def test_attach_to_unknown_session_says_so(self):
+        server = self._start_server()
+        self.assertIn("Keine Sitzung", self._text(server, "screen:-r gibt-es-nicht"))
+
+    def test_detach_explains_that_the_run_continues(self):
+        server = self._start_server()
+        antwort = self._text(server, "screen:-d")
+        self.assertIn("nichts abzuhängen", antwort)
+
+    def test_new_starts_a_fresh_session_without_calling_the_model(self):
+        agent = SlowAgent()
+        server = self._start_server(agent=agent)
+        antwort = self._text(server, "screen:-new")
+        self.assertIn("Neue Sitzung:", antwort)
+        self.assertNotEqual(agent.session_id, "api-test-session")
+        self.assertIn(agent.session_id, antwort)
+        self.assertIn("beginnt leer", antwort)
+        self.assertEqual(agent.calls, 0)
+
+    def test_new_switches_the_default_session_for_later_requests(self):
+        agent = FakeAgent()
+        server = self._start_server(agent=agent)
+        self._text(server, "screen:-new")
+        status, _, body = self._post(
+            server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": "Hallo"}]}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["fredtux_session_id"], agent.session_id)
+
+    def test_rm_removes_a_finished_session(self):
+        server = self._start_server()
+        server.sessions.append_message("alt", {"role": "user", "content": "Hallo"})
+        antwort = self._text(server, "screen:-rm alt")
+        self.assertIn("alt: gelöscht", antwort)
+        self.assertFalse(server.sessions.exists("alt"))
+
+    def test_rm_without_argument_explains_the_usage(self):
+        server = self._start_server()
+        self.assertIn("screen:-rm <Sitzung>", self._text(server, "screen:-rm"))
+
+    def test_rm_refuses_the_own_session(self):
+        server = self._start_server()
+        server.sessions.append_message("api-test-session", {"role": "user", "content": "Hallo"})
+        antwort = self._text(server, "screen:-rm api-test-session")
+        self.assertIn("eigene Sitzung", antwort)
+        self.assertTrue(server.sessions.exists("api-test-session"))
+
+    def test_rm_refuses_a_running_session(self):
+        agent = SlowAgent(delay=0.8)
+        server = self._start_server(agent=agent)
+        laeufer = threading.Thread(
+            target=lambda: self._post(
+                server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": "Hallo"}]}
+            )
+        )
+        laeufer.start()
+        time.sleep(0.2)
+        antwort = self._text(server, "screen:-rm api-test-session")
+        laeufer.join(timeout=15)
+        self.assertIn("nicht gelöscht", antwort)
+
+    def test_rm_reports_unknown_and_invalid_ids(self):
+        server = self._start_server()
+        antwort = self._text(server, "screen:-rm gibt-es-nicht")
+        self.assertIn("keine solche Sitzung", antwort)
+        antwort = self._text(server, "screen:-rm ../../etc/passwd")
+        self.assertIn("nicht gelöscht", antwort)
+
+    def test_new_is_refused_while_a_run_is_active(self):
+        agent = SlowAgent(delay=0.8)
+        server = self._start_server(agent=agent)
+        laeufer = threading.Thread(
+            target=lambda: self._post(
+                server, {"model": "fredtux-2-0", "messages": [{"role": "user", "content": "Hallo"}]}
+            )
+        )
+        laeufer.start()
+        time.sleep(0.2)
+        antwort = self._text(server, "screen:-new")
+        laeufer.join(timeout=15)
+        self.assertIn("rechnet noch", antwort)
+        self.assertEqual(agent.session_id, "api-test-session")
 
 
 if __name__ == "__main__":

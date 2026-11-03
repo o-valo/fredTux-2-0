@@ -72,6 +72,38 @@ def build_history(rounds=24, filler="x" * 500):
     return history
 
 
+def build_tool_chain(rounds=12, filler="x" * 500):
+    """Eine Frage, danach nur noch Werkzeugrunden.
+
+    So sieht der Fall aus, der den Dienst auf 10.7.0.101 mit HTTP 500
+    ("No user query found in messages.") beendet hat: die sichere
+    Schnittkante wandert rueckwaerts ueber alle Werkzeugpaare, bis hinter
+    die letzte Frage – die bleibt dann nur noch in der Zusammenfassung.
+    """
+    history = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF? " + filler},
+    ]
+    for i in range(rounds):
+        call_id = f"call-{i}"
+        history.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "curl", "arguments": "{}"},
+            }],
+        })
+        history.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": "curl",
+            "content": f"Ausgabe {i} " + filler,
+        })
+    return history
+
+
 def structure_problems(history):
     """Prueft die OpenAI-Struktur der Nachrichtliste."""
     problems = []
@@ -141,12 +173,34 @@ class CompactionTests(unittest.TestCase):
     def test_system_prompt_is_preserved(self):
         history = build_history(24)
         new_history = self.compactor.compact(history, "s1")
-        self.assertIs(new_history[0], history[0])
+        self.assertTrue(new_history[0]["content"].startswith("SYSTEM"))
 
-    def test_summary_is_second_system_message(self):
+    def test_summary_is_merged_into_system_prompt(self):
         new_history = self.compactor.compact(build_history(24), "s1")
-        self.assertEqual(new_history[1]["role"], "system")
-        self.assertIn("[Verlauf]", new_history[1]["content"])
+        self.assertEqual(new_history[0]["role"], "system")
+        self.assertIn("[Verlauf]", new_history[0]["content"])
+
+    def test_only_one_system_message(self):
+        """Eine zweite Systemnachricht ergibt bei Qwen HTTP 500.
+
+        Die Vorlage bricht mit "System message must be at the beginning." ab,
+        sobald eine Systemnachricht nicht an erster Stelle steht. Deshalb muss
+        die Verdichtung im Systemprompt aufgehen statt eine eigene Nachricht
+        zu bilden.
+        """
+        new_history = self.compactor.compact(build_history(24), "s1")
+        system_positions = [
+            index for index, message in enumerate(new_history)
+            if message.get("role") == "system"
+        ]
+        self.assertEqual(system_positions, [0])
+
+    def test_repeated_compaction_replaces_summary(self):
+        self.compactor.compact(build_history(24), "s1")
+        new_history = self.compactor.compact(build_history(48), "s1")
+        merged = new_history[0]["content"]
+        self.assertEqual(merged.count("[Verlauf]"), 1)
+        self.assertTrue(merged.startswith("SYSTEM"))
 
     def test_result_is_structurally_valid(self):
         new_history = self.compactor.compact(build_history(24), "s1")
@@ -156,18 +210,55 @@ class CompactionTests(unittest.TestCase):
         llm = StubLLM(text="y" * 5000)
         compactor = Compactor(self.config, llm, self.rag)
         new_history = compactor.compact(build_history(24), "s1")
-        body = new_history[1]["content"]
+        body = new_history[0]["content"]
         self.assertLess(len(body), self.config.summary_max_chars + 200)
 
     def test_fallback_when_model_fails(self):
         compactor = Compactor(self.config, BrokenLLM(), self.rag)
         new_history = compactor.compact(build_history(24), "s1")
         self.assertEqual(structure_problems(new_history), [])
-        self.assertTrue(new_history[1]["content"].strip())
+        self.assertIn("[Verlauf]", new_history[0]["content"])
 
     def test_summary_call_does_not_use_tools(self):
         self.compactor.compact(build_history(24), "s1")
         self.assertGreaterEqual(self.llm.calls, 1)
+
+
+class UserAnchorTests(unittest.TestCase):
+    """Nach der Verdichtung muss eine Benutzerfrage im Kontext bleiben.
+
+    Die Qwen3-Vorlage bricht sonst mit "No user query found in messages." ab
+    (HTTP 500) – live gegen 10.7.0.79 nachgewiesen: System + Werkzeugrunde
+    ohne User ergab 500, dieselbe Liste mit der Frage davor 200.
+    """
+
+    def setUp(self):
+        self.rag = Path(tempfile.mkdtemp())
+        self.config = FakeConfig()
+        self.compactor = Compactor(self.config, StubLLM(), self.rag)
+
+    def test_user_query_survives_a_tool_chain(self):
+        after = self.compactor.compact(build_tool_chain(12), "s1")
+        users = [m for m in after if m.get("role") == "user"]
+        self.assertTrue(users, "keine Benutzerfrage mehr im Kontext")
+        self.assertTrue(str(users[-1]["content"]).startswith("Was laeuft morgen"))
+
+    def test_anchored_history_is_structurally_valid(self):
+        after = self.compactor.compact(build_tool_chain(12), "s1")
+        self.assertEqual(structure_problems(after), [])
+        self.assertEqual(
+            [i for i, m in enumerate(after) if m.get("role") == "system"], [0]
+        )
+
+    def test_summary_is_still_written(self):
+        after = self.compactor.compact(build_tool_chain(12), "s1")
+        self.assertIn("[Verlauf]", after[0]["content"])
+
+    def test_every_chain_length_keeps_a_user_message(self):
+        for rounds in range(1, 15):
+            with self.subTest(runden=rounds):
+                after = self.compactor.compact(build_tool_chain(rounds), f"s{rounds}")
+                self.assertTrue(any(m.get("role") == "user" for m in after))
 
 
 class HysteresisTests(unittest.TestCase):
@@ -297,6 +388,92 @@ class ToolOutputCapTests(unittest.TestCase):
         capped = self.registry._cap_output("START" + "x" * 45_135 + "ENDE")
         self.assertTrue(capped.startswith("START"))
         self.assertTrue(capped.rstrip().endswith("ENDE"))
+
+
+class FitContextTests(unittest.TestCase):
+    """Der Ueberlauf, der auf 10.7.0.101 den 500er ausgeloest hat.
+
+    Gemessen am 01.11.2026: dieselbe Nachrichtenliste mit 16 Eintraegen belegte
+    mit Werkzeugdeklaration 7680 von 8192 Tokens. Zwei Nachrichten mehr und der
+    Server schnitt **von vorne** ab – die Frage fiel heraus, die Vorlage meldete
+    "No user query found in messages." Die Liste muss deshalb vor dem Senden
+    ins Fenster passen, samt Werkzeugdeklaration.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.config = FakeConfig(context_limit=300, keep_recent=6)
+        self.compactor = Compactor(self.config, StubLLM(), self.root)
+
+    def _history(self, tool_chars=4000, tools=2):
+        history = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF?"},
+        ]
+        for i in range(tools):
+            history.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"c{i}", "type": "function",
+                                "function": {"name": "read_file", "arguments": "{}"}}],
+            })
+            history.append({
+                "role": "tool", "tool_call_id": f"c{i}", "name": "read_file",
+                "content": f"HTML {i} " + "x" * tool_chars,
+            })
+        return history
+
+    def test_untouched_when_it_fits(self):
+        history = self._history(tool_chars=50)
+        gekuerzt, saved = self.compactor.fit_context(history)
+        self.assertEqual(saved, 0)
+        self.assertIs(gekuerzt, history)
+
+    def test_oversized_tool_output_is_clipped(self):
+        history = self._history(tool_chars=4000)
+        gekuerzt, saved = self.compactor.fit_context(history)
+        self.assertGreater(saved, 0)
+        self.assertLessEqual(
+            self.compactor.estimate_tokens(gekuerzt), self.compactor.budget(0)
+        )
+
+    def test_user_query_survives(self):
+        history = self._history(tool_chars=4000)
+        gekuerzt, _ = self.compactor.fit_context(history)
+        self.assertEqual(gekuerzt[0]["role"], "system")
+        self.assertEqual(gekuerzt[1]["role"], "user")
+        self.assertIn("ZDF", gekuerzt[1]["content"])
+
+    def test_overhead_counts_against_the_window(self):
+        """Die Werkzeugdeklaration liegt im selben Fenster wie die Historie."""
+        knapp = Compactor(FakeConfig(context_limit=500), StubLLM(), self.root)
+        history = self._history(tool_chars=1500, tools=1)
+        _, saved_ohne = knapp.fit_context(history, overhead_tokens=0)
+        _, saved_mit = knapp.fit_context(history, overhead_tokens=300)
+        self.assertEqual(saved_ohne, 0, "passt ohne Ueberhang bereits")
+        self.assertGreater(saved_mit, 0)
+        self.assertLess(knapp.budget(300), knapp.budget(0))
+
+    def test_newest_tool_output_is_clipped_last(self):
+        history = self._history(tool_chars=4000)
+        gekuerzt, _ = self.compactor.fit_context(history)
+        alt = next(m for m in gekuerzt if m.get("name") == "read_file")
+        neu = [m for m in gekuerzt if m.get("name") == "read_file"][-1]
+        self.assertLess(len(alt["content"]), len(neu["content"]) + 1)
+
+    def test_many_middle_sized_messages_fall_away(self):
+        """Kuerzen reicht nicht immer – dann muessen aelteste Runden weichen."""
+        history = [{"role": "system", "content": "SYSTEM"}]
+        history.append({"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF?"})
+        for i in range(40):
+            history.append({"role": "assistant", "content": f"Antwort {i} " + "y" * 400})
+            history.append({"role": "user", "content": f"Frage {i} " + "x" * 400})
+        gekuerzt, _ = self.compactor.fit_context(history)
+        self.assertLess(len(gekuerzt), len(history))
+        self.assertLessEqual(
+            self.compactor.estimate_tokens(gekuerzt), self.compactor.budget(0)
+        )
+        self.assertTrue(any(m.get("role") == "user" for m in gekuerzt))
 
 
 class PayloadOptionTests(unittest.TestCase):

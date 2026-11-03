@@ -8,7 +8,7 @@ import select
 import socket
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from typing import Any, Callable
@@ -19,6 +19,8 @@ from ..activitylog import ActivityLog, elapsed_ms
 from ..config import Config
 from ..core import AgentCore
 from ..llm import LLMError
+from ..runs import RunRegistry
+from ..sessions import SessionStore
 
 
 class FredTuxHTTPServer(ThreadingHTTPServer):
@@ -35,6 +37,9 @@ class FredTuxHTTPServer(ThreadingHTTPServer):
         # abgewiesene Anfrage sagen kann, worauf sie gewartet hat.
         self.run_client: str | None = None
         self.run_started: float | None = None
+        # Was gerade rechnet und wie weit es ist – Grundlage für ``screen:-r``.
+        self.runs = RunRegistry()
+        self.sessions = SessionStore(config.sessions_dir)
         self.activity = ActivityLog(
             config.activity_log_path, config.log_enabled, config.log_level
         )
@@ -113,9 +118,21 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "session_id muss eine nicht leere Zeichenkette sein.")
             return
 
+        # ``screen:``-Befehle werden hier abgefangen – vor dem Laufplatz und ohne
+        # das Modell zu sehen. Damit funktionieren sie in jedem Client, der
+        # einfach Text schickt (OpenWebUI, Ollama-App, curl).
+        befehl, user_text = self._screen_split(user_text)
+        if befehl is not None:
+            self._handle_screen(befehl, session_id)
+            return
+
         if stream_requested:
             completion_id = f"chatcmpl-fredtux-{uuid.uuid4().hex}"
             chunks = 0
+            lauf = None
+            # Vorbelegung, damit auch ein Fehler vor dem ersten Token noch eine
+            # Sitzungsangabe im Abbruchtext hat statt eines NameError.
+            active_session = session_id or "-"
             self._start_sse()
             slot = self._acquire_run_slot()
             if slot != "ok":
@@ -128,6 +145,7 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
                     else:
                         agent = self.server.default_agent
                     active_session = agent.session_id
+                    lauf = self.server.runs.begin(active_session, self.address_string())
                     # Denkausgabe und Marker mitschicken, wenn der Agent es kann.
                     sende_ereignis = self._reasoning_sender(completion_id, agent)
                     strom = (
@@ -137,8 +155,11 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
                     )
                     for chunk in strom:
                         chunks += 1
+                        lauf.append(chunk)
                         self._send_sse_chunk(completion_id, active_session, content=chunk)
                 finally:
+                    if lauf is not None:
+                        self.server.runs.finish(lauf)
                     self._release_run_slot()
                 self._send_sse_chunk(completion_id, active_session, finish_reason="stop")
                 # Erst protokollieren, dann abschließen: der Datensatz steht auch
@@ -155,19 +176,24 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
                 self._request_event(
                     "http.error", status=500, stream=True, chunks=chunks, error=str(exc)
                 )
-                self._send_sse_error(str(exc))
+                self._send_sse_abbruch(
+                    completion_id, active_session, str(exc) or type(exc).__name__
+                )
             return
 
         slot = self._acquire_run_slot()
         if slot != "ok":
             self._report_no_slot(slot, stream=False)
             return
+        lauf = None
         try:
             if session_id:
                 agent = self.server.agent_factory(session_id)
             else:
                 agent = self.server.default_agent
+            lauf = self.server.runs.begin(agent.session_id, self.address_string())
             answer = agent.ask(user_text)
+            lauf.append(answer)
             active_session = agent.session_id
         except FileNotFoundError as exc:
             self._send_error_json(404, str(exc))
@@ -179,6 +205,8 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(500, f"FredTux-interner Fehler: {type(exc).__name__}: {exc}")
             return
         finally:
+            if lauf is not None:
+                self.server.runs.finish(lauf)
             self._release_run_slot()
 
         self._request_event("http.response", status=200, session=active_session, chars=len(answer))
@@ -270,6 +298,224 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
             self._send_sse_error(message)
             return
         self._send_error_json(429, message, retry_after=max(1, int(limit) or 30))
+
+    # ------------------------------------------------------------------ screen:
+    SCREEN_PREFIX = "screen:"
+    SCREEN_HELP = (
+        "screen:-Befehle – reiner Text, also in jedem Client nutzbar:\n"
+        "  screen:-ls             Was rechnet gerade, welche Sitzungen gibt es\n"
+        "  screen:-r              An die eigene Sitzung hängen, auf das Ergebnis warten\n"
+        "  screen:-r <Sitzung>    An eine bestimmte Sitzung hängen\n"
+        "  screen:-a              An den gerade laufenden Lauf hängen (ohne ID)\n"
+        "  screen:-d              Zustand der eigenen Sitzung samt Erklärung\n"
+        "  screen:-new            Neue Sitzung beginnen, Verlauf bleibt als Datei\n"
+        "  screen:-rm <Sitzung>    Sitzung löschen (nicht die eigene, nicht laufende)\n"
+        "Diese Befehle erreichen das Modell nicht und belegen keinen Laufplatz.\n"
+        "Ein Backslash davor (\\screen:-ls) schaltet die Sonderbedeutung ab."
+    )
+
+    @classmethod
+    def _screen_split(cls, text: str) -> tuple[str | None, str]:
+        r"""Trennt Befehle von normalem Text.
+
+        Rückgabe ist ``(befehl, text)``: Bei ``screen:-ls`` kommt der Befehl und
+        der Text bleibt stehen; bei normalem Text ist der Befehl ``None``. Ein
+        **Backslash** vor dem Präfix hebt die Sonderbedeutung auf – ``\screen:-ls``
+        geht als ``screen:-ls`` an das Modell, damit man über die Befehle reden
+        kann, ohne sie auszulösen.
+        """
+        stripped = text.lstrip()
+        if stripped.startswith("\\" + cls.SCREEN_PREFIX):
+            return None, stripped[1:]
+        if not stripped.lower().startswith(cls.SCREEN_PREFIX):
+            return None, text
+        return stripped[len(cls.SCREEN_PREFIX):].strip(), text
+
+    def _handle_screen(self, command: str, session_id: str | None) -> None:
+        eigene = session_id or self.server.default_agent.session_id
+        teile = command.split(maxsplit=1)
+        wort = teile[0] if teile else ""
+        argument = teile[1].strip() if len(teile) > 1 else ""
+        op = wort.lstrip("-").lower()
+        if op in ("ls", "l", "list"):
+            antwort = self._screen_list()
+        elif op in ("r", "attach"):
+            antwort = self._screen_attach(argument or eigene)
+        elif op in ("a", "all"):
+            antwort = self._screen_attach(None, irgendeinen=True)
+        elif op in ("d", "detach"):
+            antwort = self._screen_detach(eigene)
+        elif op in ("n", "new", "neu"):
+            antwort = self._screen_new(session_id)
+        elif op in ("rm", "del", "delete", "weg", "loeschen", "löschen"):
+            antwort = self._screen_rm(argument, eigene)
+        else:
+            antwort = self.SCREEN_HELP
+        self._request_event("http.screen", session=eigene, command=command[:40])
+        self._send_completion(eigene, antwort)
+
+    def _screen_list(self) -> str:
+        laufend = self.server.runs.active()
+        zeilen = [f"Läuft: {lauf.describe()}" for lauf in laufend] or ["Läuft: nichts."]
+        sitzungen = self.server.sessions.list_sessions()
+        zeilen.append(f"Sitzungen: {len(sitzungen)}")
+        zeilen.extend(f"  - {sid}" for sid in sitzungen[-8:])
+        return "\n".join(zeilen)
+
+    def _screen_attach(self, ziel: str | None, irgendeinen: bool = False) -> str:
+        """Hängt sich an einen Lauf und liefert dessen Text – ohne neuen Lauf."""
+        if irgendeinen:
+            laufend = self.server.runs.active()
+            if not laufend:
+                return "Es rechnet gerade nichts. Mit screen:-ls siehst du die Sitzungen."
+            if len(laufend) > 1:
+                return (
+                    "Mehrere Läufe aktiv:\n"
+                    + "\n".join(lauf.describe() for lauf in laufend)
+                    + "\nNimm eine davon: screen:-r <Sitzung>"
+                )
+            ziel = laufend[0].session_id
+        if not ziel:
+            return "Wozu? screen:-r <Sitzung> – oder screen:-a für den laufenden Lauf."
+        lauf = self.server.runs.get(ziel)
+        if lauf is not None and not lauf.finished:
+            limit = self.server.config.queue_timeout
+            if not lauf.wait(None if limit < 0 else limit):
+                return (
+                    f"Sitzung {ziel} rechnet noch ({lauf.age()} s, {lauf.chars()} Zeichen). "
+                    f"Nichts abgebrochen – noch einmal screen:-r {ziel} hängt sich wieder an."
+                )
+        if lauf is not None and lauf.text():
+            return f"[angehängt an {ziel}]\n{lauf.text()}"
+        gespeichert = self._last_stored_answer(ziel)
+        if gespeichert is None:
+            return f"Keine Sitzung {ziel!r}."
+        if not gespeichert:
+            return f"Sitzung {ziel} hat noch keine Antwort."
+        return f"[aus der Sitzung {ziel}]\n{gespeichert}"
+
+    def _screen_detach(self, ziel: str) -> str:
+        lauf = self.server.runs.get(ziel)
+        if lauf is None or lauf.finished:
+            return f"Sitzung {ziel}: nichts abzuhängen, es rechnet gerade nichts."
+        return (
+            f"Sitzung {ziel}: {lauf.describe()}.\n"
+            "Abhängen ändert daran nichts – der Lauf gehört zur Sitzung, nicht zur "
+            "Verbindung. Er rechnet weiter, und die Antwort steht danach in der Sitzung."
+        )
+
+    def _screen_new(self, session_id: str | None) -> str:
+        """Beginnt eine neue Sitzung – der alte Verlauf bleibt als Datei liegen.
+
+        Ohne ``session_id`` arbeitet FredTux mit dem Standard-Agenten; genau der
+        wird hier umgeschaltet, damit die nächste Anfrage wirklich leer beginnt.
+        Läuft in dieser Sitzung gerade ein Lauf, wird **nicht** umgeschaltet –
+        sonst landeten dessen Nachrichten im neuen Verlauf.
+        """
+        agent = self.server.default_agent
+        alt = getattr(agent, "session_id", "-")
+        lauf = self.server.runs.get(alt)
+        if lauf is not None and not lauf.finished:
+            return (
+                f"Sitzung {alt} rechnet noch ({lauf.age()} s, {lauf.chars()} Zeichen). "
+                "Nicht umgeschaltet – nach dem Ende noch einmal screen:-new."
+            )
+        umschalten = getattr(agent, "new_session", None)
+        neu = umschalten() if callable(umschalten) else self._new_session_id(agent)
+        hinweis = ""
+        if session_id and session_id != alt:
+            hinweis = (
+                f"\nDiese Anfrage kam mit session_id={session_id}; umgeschaltet ist der "
+                "Standardverlauf, nicht deine eigene Sitzung. Für einen leeren Verlauf "
+                f"dort: session_id={neu} mitschicken."
+            )
+        return (
+            f"Neue Sitzung: {neu}\n"
+            f"Vorher: {alt} (bleibt als Datei in {self.server.config.sessions_dir}).\n"
+            "Der Verlauf beginnt leer.\n"
+            f'Folgeanfragen: "session_id": "{neu}" oder Header X-FredTux-Session-ID – '
+            "ohne Angabe landet die nächste Anfrage in dieser neuen Sitzung."
+            + hinweis
+        )
+
+    def _screen_rm(self, argument: str, eigene: str) -> str:
+        """Löscht abgeschlossene Sitzungen – nie die eigene und nie eine laufende.
+
+        Mehrere IDs sind erlaubt (durch Leerzeichen oder Komma getrennt). Die
+        Antwort nennt für jede ID, ob sie gelöscht wurde und warum nicht.
+        """
+        kandidaten = [teil for teil in argument.replace(",", " ").split() if teil]
+        if not kandidaten:
+            return (
+                "Wozu? screen:-rm <Sitzung> – die IDs stehen in screen:-ls. "
+                "Die eigene Sitzung und laufende Sitzungen bleiben unangetastet."
+            )
+        standard = getattr(self.server.default_agent, "session_id", None)
+        zeilen: list[str] = []
+        for session_id in kandidaten:
+            if session_id == eigene:
+                zeilen.append(f"{session_id}: nicht gelöscht – das ist die eigene Sitzung.")
+                continue
+            if session_id == standard:
+                zeilen.append(
+                    f"{session_id}: nicht gelöscht – der Standardverlauf nutzt sie gerade "
+                    "(erst screen:-new, dann löschen)."
+                )
+                continue
+            lauf = self.server.runs.get(session_id)
+            if lauf is not None and not lauf.finished:
+                zeilen.append(
+                    f"{session_id}: nicht gelöscht – der Lauf rechnet noch "
+                    f"({lauf.age()} s, {lauf.chars()} Zeichen)."
+                )
+                continue
+            try:
+                entfernt = self.server.sessions.remove(session_id)
+            except ValueError as exc:
+                zeilen.append(f"{session_id}: nicht gelöscht – {exc}")
+                continue
+            if not entfernt:
+                zeilen.append(f"{session_id}: keine solche Sitzung.")
+                continue
+            namen = ", ".join(datei.name for datei in entfernt)
+            zeilen.append(f"{session_id}: gelöscht ({namen}).")
+        return "\n".join(zeilen)
+
+    def _new_session_id(self, agent: Any) -> str:
+        """Ersatz, wenn der Agent kein ``new_session`` kann (Test-Agenten)."""
+        neu = datetime.now(timezone.utc).strftime("session-%Y%m%d-%H%M%S-%f")
+        agent.session_id = neu
+        agent.history = []
+        return neu
+
+    def _last_stored_answer(self, session_id: str) -> str | None:
+        """Letzte gespeicherte Antwort einer Sitzung; ``None`` = Sitzung unbekannt."""
+        if not self.server.sessions.exists(session_id):
+            return None
+        for message in reversed(self.server.sessions.load(session_id)):
+            if message.get("role") == "assistant" and str(message.get("content", "")).strip():
+                return str(message["content"])
+        return ""
+
+    def _send_completion(self, session_id: str, text: str) -> None:
+        """Antwort im selben Format wie eine Modellantwort – Clients merken keinen Unterschied."""
+        self._send_json(
+            200,
+            {
+                "id": f"chatcmpl-fredtux-{uuid.uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": self.server.config.api_model,
+                "fredtux_session_id": session_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": text},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
 
     def _client_gone(self) -> bool:
         """True, wenn der Client die Verbindung schon geschlossen hat.
@@ -405,6 +651,33 @@ class FredTuxRequestHandler(BaseHTTPRequestHandler):
             self._send_sse_done()
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _send_sse_abbruch(
+        self, completion_id: str, session_id: str, grund: str
+    ) -> None:
+        """Beendet einen gestreamten Lauf lesbar, statt ihn stumm abzureißen.
+
+        Der Status 200 ging beim Streaming längst hinaus; ein reines
+        Fehlerereignis ohne ``choices`` wird von manchen Clients verschluckt,
+        und im Chat sieht es dann aus, als wäre nichts passiert – genau das
+        „völlig stumm abgebrochen" aus den Protokollen. Deshalb kommt die
+        Begründung als letzter Inhaltsteil mit ``finish_reason=stop``, also dort,
+        wo der Benutzer ohnehin liest, und danach das Fehlerereignis für
+        Programme, die es auswerten.
+        """
+        text = (
+            f"\n\n[FredTux] Lauf abgebrochen – {grund}\n"
+            "Der Abbruch betrifft diesen Auftrag, nicht den Dienst: er nimmt die "
+            "nächste Anfrage wieder an. Die bisherigen Werkzeugergebnisse stehen "
+            "in der Sitzung, eine neue Anweisung setzt dort an."
+        )
+        try:
+            self._send_sse_chunk(
+                completion_id, session_id, content=text, finish_reason="stop"
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        self._send_sse_error(grund)
 
     def _write_sse(self, payload: dict[str, Any]) -> None:
         body = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")

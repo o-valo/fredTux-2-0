@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project uses semantic versioning.
 
+## [0.6.2] - 2026-11-03
+
+### Fixed
+- **Ein Abbruch im Stream endet nicht mehr stumm.** Beim Streaming geht der
+  Status 200 schon mit dem ersten Byte hinaus; brach der Lauf danach ab (etwa
+  weil der Modellserver mit HTTP 500 antwortete), kam nur ein
+  `{"error": …}`-Ereignis ohne `choices` – und im Chat sah es aus, als wäre
+  nichts geschehen. Jetzt steht die Begründung als letzter Inhaltsteil mit
+  `finish_reason=stop` im Chat, gefolgt vom Fehlerereignis für Programme. Der
+  Abbruch betrifft den Auftrag, nicht den Dienst.
+- **Fortschritt heißt jetzt „neue Antwort“, nicht „Aufruf erfolgreich“.** Bisher
+  setzte jeder geglückte Werkzeugaufruf den Leerlaufzähler zurück; ein Lauf, der
+  dieselbe Datei in jeder Runde erneut las und jedes Mal denselben Text erhielt,
+  lief deshalb bis zur harten Rundengrenze weiter. Jetzt zählt ein Aufruf nur
+  dann als Fortschritt, wenn seine Antwort so noch nicht im Kontext stand;
+  wiederholte Aufrufe erhöhen stattdessen `FREDTUX_MAX_IDLE_ROUNDS`.
+
+### Added
+- **`screen:-new` beginnt eine neue Sitzung** – über den Chat-Endpunkt, aus
+  jedem Client. Der bisherige Verlauf bleibt als Datei in
+  `FREDTUX_HOME/sessions/` liegen, der Standard-Agent startet mit leerem
+  Kontext, und die Antwort nennt die neue Sitzungs-ID (die auch als
+  `session_id` oder `X-FredTux-Session-ID` weiterverwendet werden kann). Läuft
+  in der Sitzung gerade ein Lauf, wird **nicht** umgeschaltet – die Meldung
+  nennt Grund und Dauer, damit keine Nachrichten im neuen Verlauf landen.
+  Damit lässt sich der Kontext zurücksetzen, ohne den Dienst neu zu starten.
+- **`screen:-rm <Sitzung> …` löscht abgeschlossene Sitzungen** samt
+  `.json`-Sidecar, mehrere IDs durch Leerzeichen oder Komma getrennt. Die eigene
+  Sitzung, der Standardverlauf und laufende Sitzungen bleiben unangetastet – die
+  Antwort sagt je ID, ob gelöscht wurde und warum nicht. Ungültige IDs werden
+  abgewiesen, statt einen Pfad zu bereinigen. Dazu `SessionStore.remove()`, damit
+  das Löschen dort passiert, wo auch das Locken und Lesen liegt.
+- **Abbruchmeldung im Stream lesbar** – siehe *Fixed* oben: `_send_sse_abbruch`
+  schreibt Grund und Sitzungsstand in den Chat, bevor das Fehlerereignis folgt.
+- **`FREDTUX_MAX_REPEAT_CALLS`** (Standard `3`): derselbe Aufruf, der
+  hintereinander dieselbe Antwort liefert, bricht den Lauf mit einer Meldung ab,
+  die Werkzeug, Anzahl und Grund nennt. Zusammen mit der Leerlaufgrenze macht das
+  eine hohe `FREDTUX_MAX_TOTAL_ROUNDS` vertretbar: Schleifen enden an der Sache
+  statt an der Uhr.
+
 ## [0.6.0] - 2026-10-29
 
 ### Added

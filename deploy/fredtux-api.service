@@ -1,0 +1,19 @@
+[Unit]
+Description=FredTux 2.0 API-Server (OpenAI-kompatibel)
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target wg-quick@wg0.service
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/home/bot/fredTux-2-0
+EnvironmentFile=/home/bot/fredTux-2-0/config.nd
+ExecStart=/home/bot/fredTux-2-0/.venv/bin/fredtux --serve
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/bot/fredtux-logs/api.log
+StandardError=append:/home/bot/fredtux-logs/api.log
+
+[Install]
+WantedBy=multi-user.target

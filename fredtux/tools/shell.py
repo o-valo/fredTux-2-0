@@ -19,7 +19,7 @@ CODING_COMMANDS = frozenset(
     {
         "python3", "pip3", "make", "git", "find", "ruff", "black", "mypy",
         "bash", "sh", "tar", "which", "wc", "head", "tail", "sort", "uniq", "date", "rm", "cp", "mv", "chmod",
-        "df", "du", "free", "curl", "wget", "pwd", "ls", "grep", "cat", "mkdir", "touch",
+        "df", "du", "free", "curl", "wget", "lynx", "pwd", "ls", "grep", "cat", "mkdir", "touch",
         "true", "false", "echo", "printf", "test", "stat", "dirname", "basename", "env",
         "sed", "awk", "xargs", "cut", "tr", "nl", "paste", "join", "comm", "column", "fold", "expand", "split", "csplit",
         "diff", "patch", "md5sum", "sha256sum", "base64", "ps", "kill", "timeout", "watch", "nc", "telnet", "dig", "ss",
@@ -93,7 +93,7 @@ class ShellTools:
     def read_file(self, path: str, max_bytes: int = 100_000) -> str:
         target = self._resolve_read_path(path)
         if not target.is_file():
-            raise ShellError(f"Datei nicht gefunden: {target}")
+            raise ShellError(self._missing_file_hint(target))
         if max_bytes < 1 or max_bytes > 2_000_000:
             raise ShellError("max_bytes muss zwischen 1 und 2.000.000 liegen.")
         data = target.read_bytes()[:max_bytes]
@@ -117,6 +117,45 @@ class ShellTools:
         target.chmod(int(mode, 8))
         return f"Rechte von {target} auf {mode} gesetzt."
 
+    def _missing_file_hint(self, target: Path) -> str:
+        """Nennt bei einer fehlenden Datei, was es stattdessen gibt.
+
+        Ohne diesen Hinweis ist ein geratener Dateiname eine Sackgasse: das
+        Modell probiert ``zdf-tv-programm-api.md``, bekommt nur "nicht
+        gefunden" und laeuft in drei Fehlschlaege hintereinander, bis der Lauf
+        abgebrochen wird. Aehnliche Namen und der Hinweis auf
+        ``list_knowledge`` geben ihm eine echte naechste Handlung.
+        """
+        suchbegriffe = {
+            teil for teil in re.split(r"[^a-z0-9]+", target.stem.casefold()) if len(teil) > 2
+        }
+        aehnlich: list[str] = []
+        vorhanden: list[str] = []
+        for verzeichnis in (target.parent, self.config.rag_dir):
+            try:
+                dateien = sorted(p for p in verzeichnis.iterdir() if p.is_file())
+            except OSError:
+                continue
+            for datei in dateien:
+                if datei == target or datei.name in vorhanden:
+                    continue
+                vorhanden.append(datei.name)
+                teile = {teil for teil in re.split(r"[^a-z0-9]+", datei.stem.casefold()) if len(teil) > 2}
+                if suchbegriffe & teile:
+                    aehnlich.append(datei.name)
+        text = f"Datei nicht gefunden: {target}"
+        if aehnlich:
+            return f"{text}. Aehnliche Dateien: {', '.join(aehnlich[:6])}"
+        if vorhanden:
+            return (
+                f"{text}. Im Verzeichnis {target.parent} liegen: "
+                f"{', '.join(vorhanden[:8])}"
+            )
+        return (
+            f"{text}. Dort liegt keine Datei und die Wissensdateien kennt nur "
+            "list_knowledge. Dateinamen nicht raten, sondern zuerst auflisten lassen."
+        )
+
     def _require_write_mode(self) -> None:
         if not self.config.shell_write_enabled:
             raise ShellError("Schreiben ist deaktiviert; FREDTUX_SHELL_WRITE=1 erforderlich.")
@@ -128,14 +167,26 @@ class ShellTools:
             raise ShellError("Pfad darf nicht leer sein.")
         path = Path(value).expanduser()
         target = (self.root / path if not path.is_absolute() else path).resolve()
-        if not target.is_relative_to(self.root):
-            raise ShellError(f"Pfad liegt außerhalb des erlaubten Bereichs: {self.root}")
+        # Die eigenen Wissensdateien liegen bewusst ausserhalb des
+        # Arbeitsverzeichnisses. Ohne diesen Bereich ist read_file auf genau die
+        # Dateien nicht moeglich, die list_knowledge und search_knowledge
+        # anbieten – das Modell rast dann in eine Sackgasse.
+        erlaubt = (self.root, self.config.rag_dir.resolve())
+        if not any(target == pfad or target.is_relative_to(pfad) for pfad in erlaubt):
+            raise ShellError(
+                "Pfad liegt außerhalb des erlaubten Bereichs. Lesbar sind: "
+                + ", ".join(map(str, erlaubt))
+                + " – ein Dateiname ohne Verzeichnis gilt relativ zum Arbeitsverzeichnis."
+            )
         return target
 
     def _resolve_write_path(self, value: str) -> Path:
         target = self._resolve_read_path(value)
         if not target.is_relative_to(self.write_root):
-            raise ShellError(f"Pfad liegt außerhalb des Schreibbereichs: {self.write_root}")
+            raise ShellError(
+                f"Pfad liegt außerhalb des Schreibbereichs. Schreibbar ist nur {self.write_root} "
+                "– dort einen Dateinamen ohne Verzeichnis verwenden."
+            )
         if self.config.shell_mode != "yolo":
             relative_parts = target.relative_to(self.write_root).parts
             if target.name in PROTECTED_STANDARD_NAMES or ".git" in relative_parts or ".venv" in relative_parts:
@@ -169,7 +220,11 @@ class ShellTools:
         ):
             target.parent.mkdir(parents=True, exist_ok=True)
             return target
-        raise ShellError(f"Pfad liegt außerhalb des erlaubten Schreibbereichs: {target}")
+        erlaubt = ", ".join(str(pfad) for pfad in (self.write_root, *self.extra_roots))
+        raise ShellError(
+            f"Pfad liegt außerhalb des erlaubten Schreibbereichs: {target}. "
+            f"Schreibbar sind nur: {erlaubt} – dort einen Dateinamen ohne Verzeichnis verwenden."
+        )
 
     def _allowed(self, args: list[str]) -> bool:
         command = Path(args[0]).name
@@ -225,14 +280,15 @@ class ShellTools:
                 cwd=self._resolve_cwd(cwd),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
                 timeout=self.config.shell_timeout,
                 env=self._safe_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise ShellError(f"Zeitüberschreitung nach {self.config.shell_timeout:g} Sekunden: {args[0]}") from exc
-        return self._format_result(args, result.returncode, result.stdout, result.stderr)
+        return self._format_result(
+            args, result.returncode, self._decode(result.stdout), self._decode(result.stderr)
+        )
 
     def _run_bash(self, command: str, cwd: str | None, timeout: float | None = None) -> str:
         effective_timeout = timeout if timeout is not None else self.config.shell_timeout
@@ -242,14 +298,42 @@ class ShellTools:
                 cwd=self._resolve_cwd(cwd),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
                 timeout=effective_timeout,
                 env=self._safe_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise ShellError(f"Zeitüberschreitung nach {effective_timeout:g} Sekunden.") from exc
-        return self._format_result(["bash", "-lc", command], result.returncode, result.stdout, result.stderr)
+        return self._format_result(
+            ["bash", "-lc", command],
+            result.returncode,
+            self._decode(result.stdout),
+            self._decode(result.stderr),
+        )
+
+    @staticmethod
+    def _decode(data: bytes | None) -> str:
+        """Dekodiert Prozessausgabe tolerant statt den Lauf zu verlieren.
+
+        Mit ``text=True`` wirft subprocess bei Binaerausgabe einen
+        UnicodeDecodeError und die **gesamte** Ausgabe ist weg – ein ``curl``
+        auf eine gzip-Antwort (`0x8b` an Position 1) hat so eine Werkzeugrunde
+        mit einem Fehler beendet, obwohl die Daten da waren. Stattdessen wird
+        ersetzt und der Grund genannt.
+        """
+        if not data:
+            return ""
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        if data[:2] == b"\x1f\x8b":
+            grund = "die Daten sind gzip-komprimiert (mit gzip -d entpacken)"
+        else:
+            grund = "Binaerdaten"
+        return f"[Ausgabe nicht als UTF-8 lesbar: {grund}; unlesbare Bytes ersetzt]\n" + data.decode(
+            "utf-8", errors="replace"
+        )
 
     @staticmethod
     def _safe_env() -> dict[str, str]:

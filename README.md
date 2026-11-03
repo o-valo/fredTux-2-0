@@ -12,7 +12,7 @@ FredTux 2.0 is a modular, local agent harness built on the Python standard libra
 It combines a CLI interface with an agent loop, file-based sessions, an Ollama
 client, and interchangeable tools.
 
-- **Project status:** MVP / 0.6.0. The CLI, the local OpenAI-compatible HTTP API,
+- **Project status:** MVP / 0.5.0. The CLI, the local OpenAI-compatible HTTP API,
 -  the Ollama pre-check, session persistence, Markdown logging, SSE streaming, and
 -  the local RAG tools are implemented. Authentication, the TUI, and MCP plugins are
 -  not implemented yet.
@@ -64,6 +64,99 @@ Ollama endpoint. If the Ollama check is not needed:
 .venv/bin/fredtux --no-ollama-check
 ```
 
+## Starting, stopping, operating
+
+Three ways to run it – depending on whether you want to ask something quickly
+or keep the service up permanently.
+
+### 1. Interactive terminal
+
+```bash
+.venv/bin/fredtux                  # new session
+.venv/bin/fredtux --session <ID>   # resume an existing session
+```
+
+Quit with `/exit`, `/quit`, Ctrl+C or Ctrl+D. Inside the dialog: `/help`,
+`/sessions`, `/session <ID>`, `/new`. `--no-ollama-check` skips the pre-check
+when the model server is not reachable right now.
+
+### 2. As a systemd service
+
+The unit ships with the repo: [`deploy/fredtux-api.service`](deploy/fredtux-api.service).
+Set it up once:
+
+```bash
+sudo cp deploy/fredtux-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fredtux-api
+```
+
+After that:
+
+| Task | Command |
+|---|---|
+| start | `sudo systemctl start fredtux-api` |
+| stop | `sudo systemctl stop fredtux-api` |
+| restart | `sudo systemctl restart fredtux-api` |
+| status | `systemctl status fredtux-api` |
+| follow the log | `tail -F ~/fredtux-logs/api.log` |
+
+The unit reads `config.nd` through `EnvironmentFile`. **Changes there only take
+effect after a restart** – that is the most common cause of "the setting is not
+applied".
+
+The shipped unit is tailored to the node it was created on:
+`After=/Wants=wg-quick@wg0.service` and the log path
+`/home/bot/fredtux-logs/api.log`. Adjust both on any other machine, otherwise
+the service will not start or will write nowhere.
+
+### 3. Without systemd, in a detached `screen` session
+
+For machines without root or when the unit does not fit:
+
+```bash
+screen -dmS fredtux bash -lc 'cd ~/fredTux-2-0 && exec .venv/bin/fredtux --serve >> ~/.fredtux-2.0/logs/api.log 2>&1'
+screen -ls                     # is it running?
+screen -r fredtux              # watch it, detach again with Ctrl+A then D
+screen -S fredtux -X quit      # stop it
+```
+
+Upside: the session survives closing the terminal. Downside: it does **not**
+survive a reboot – that is what the unit is for.
+
+### 4. Calls from outside: the CLI tool
+
+`fredtux --serve` speaks OpenAI-compatible HTTP, so any client can connect, and
+`curl` is enough from the command line:
+
+```bash
+curl -s http://127.0.0.1:8765/health
+curl -s http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"fredtux-2-0","messages":[{"role":"user","content":"Reply with OK only"}]}'
+```
+
+Easier is the helper **`~/freebuff/fredtux-curl.sh`** – **not part of this repo**,
+it belongs to the Freebuff store on the agent machine. It bundles the steps you
+would otherwise type by hand every time, and runs from there against any node
+(`--url`); the examples below assume it is on your `PATH` or called as
+`~/freebuff/fredtux-curl.sh`:
+
+```bash
+fredtux-curl.sh --health                  # /health only, send nothing
+fredtux-curl.sh --neu "question"          # new session, the ID is printed
+fredtux-curl.sh -s <ID> "one more question"
+fredtux-curl.sh --neustart                # restart the service, then wait for /health
+fredtux-curl.sh --nur-neustart            # restart only
+fredtux-curl.sh --pruefen                 # are all required programs present?
+```
+
+Settings come from `~/freebuff/fredtux-curl.conf` – looked up next to the script
+and in `~/freebuff/`, or given explicitly with `--config`: `FREDTUX_API_URL`,
+`FREDTUX_SSH_HOST`, `FREDTUX_SERVICE`, `FREDTUX_RESTART_WAIT`,
+`FREDTUX_MAX_TIME`. It restarts locally via `sudo systemctl` or remotely via
+SSH, decides on its own, and `FREDTUX_LOKAL=1` or `0` forces the choice.
+
 ## Default environment
 
 The following values are the built-in fallbacks. A `config.nd` present in the
@@ -92,8 +185,9 @@ an Ollama node and not an OpenAI-compatible hub. No credentials are required.
 | `FREDTUX_QUEUE_TIMEOUT` | `300` | Seconds a request may wait for the single run slot; `0` = don't wait (429), `< 0` = wait forever |
 | `FREDTUX_STREAM_LOG` | `1` | `1` writes every run live to `<home>/logs/stream.log` |
 | `FREDTUX_STREAM_LOG_FILE` | `<FREDTUX_HOME>/logs/stream.log` | Alternative path for the transparency log |
-| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Rounds without a successful tool call before aborting |
+| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Rounds without new tool output before aborting |
 | `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Hard upper bound on all tool rounds (runaway-loop guard) |
+| `FREDTUX_MAX_REPEAT_CALLS` | `3` | Same call returning the same answer aborts after this many repeats |
 | `FREDTUX_LOG` | `0` | `1` enables the activity log |
 | `FREDTUX_LOG_LEVEL` | `info` | `info` logs the flow, `debug` adds every HTTP access line |
 | `FREDTUX_LOG_FILE` | `<FREDTUX_HOME>/logs/fredtux.jsonl` | Alternative path for the activity log |
@@ -154,6 +248,7 @@ FREDTUX_API_PORT=8765
 FREDTUX_API_MODEL=fredtux-2-0
 FREDTUX_MAX_IDLE_ROUNDS=6
 FREDTUX_MAX_TOTAL_ROUNDS=40
+FREDTUX_MAX_REPEAT_CALLS=3
 ```
 
 `127.0.0.1:8000` is not a direct Ollama port, which is why the native `/api/*`
@@ -282,7 +377,25 @@ accepts the compatibility name `fredtux-2.0`; unknown models are rejected with
 HTTP 400.
 
 The response additionally contains `fredtux_session_id`. To resume, the same ID can
-be sent as the JSON field `session_id` or as the `X-FredTux-Session-ID` header. By
+be sent as the JSON field `session_id` or as the `X-FredTux-Session-ID` header.
+
+### Control commands `screen:` – without the model
+
+A message starting with `screen:` is intercepted **before** the run: it never
+reaches the model and does not occupy the run slot. That makes session handling
+possible from any client that just sends text (curl, OpenWebUI, Ollama app).
+
+| Input | Effect |
+|---|---|
+| `screen:-ls` | what is running, plus the latest sessions |
+| `screen:-r [session]` | attach to a run and wait for its result |
+| `screen:-a` | attach to the currently running run (no ID needed) |
+| `screen:-d` | state of the own session, with an explanation |
+| `screen:-new` | start a new session; the old history stays on disk |
+| `screen:-rm <session> …` | delete finished sessions (never the own, never a running one) |
+
+A leading backslash (`\screen:-ls`) disables the special meaning and sends the
+text to the model. By
 default the server binds to `0.0.0.0:8765` and is therefore reachable from the
 local network. To access it from another machine, use the IP address of this
 machine, for example `http://192.168.x.x:8765/v1`; `0.0.0.0` itself is not a
@@ -392,8 +505,9 @@ Two limits still guard against runaway loops:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Abort after this number of *consecutive* rounds without progress; every successful round resets the counter |
-| `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Hard upper bound on all rounds as a last safety net |
+| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Abort after this number of *consecutive* rounds without progress; every round that brings tool output not yet in the context resets the counter |
+| `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Hard upper bound on all rounds as a last safety net; with a fast model it may sit much higher, because loops end at the idle and repeat limits first |
+| `FREDTUX_MAX_REPEAT_CALLS` | `3` | A tool called with the same arguments returning the same answer does not count as progress; reaching this count aborts the run with a message |
 
 Repeated failures are additionally caught by `_tool_loop_error`: the second call
 of the same tool with the same failing parameters, or three consecutive
@@ -658,7 +772,7 @@ git diff --check
 ```
 
 Then push the current state to `main` on GitHub and publish the version from
-`pyproject.toml` (currently `0.6.0`) as a release. Do not commit secrets, `.venv`
+`pyproject.toml` (currently `0.5.0`) as a release. Do not commit secrets, `.venv`
 contents, or private `~/.fredtux-2.0` data.
 
 ## License

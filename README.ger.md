@@ -12,7 +12,7 @@ der Python-Standardbibliothek. Er verbindet eine CLI-Oberfläche
 mit einem Agenten-Loop, dateibasierten Sitzungen, einem 
 Ollama-Client und austauschbaren Werkzeugen.
 
- **Projektstatus:** MVP / 0.6.0. CLI, lokale OpenAI-kompatible HTTP-API, Ollama-Vorcheck,
+ **Projektstatus:** MVP / 0.5.0. CLI, lokale OpenAI-kompatible HTTP-API, Ollama-Vorcheck,
  Session-Persistenz, Markdown-Protokollierung, SSE-Streaming und die lokalen RAG-Werkzeuge sind
  implementiert. Authentifizierung, TUI und MCP-Plugins sind noch nicht implementiert.
 
@@ -63,6 +63,100 @@ Ollama-Check nicht gebraucht wird:
 .venv/bin/fredtux --no-ollama-check
 ```
 
+## Starten, beenden, bedienen
+
+Drei Betriebsarten – je nachdem, ob du schnell etwas fragen oder den Dienst
+dauerhaft laufen lassen willst.
+
+### 1. Dialog im Terminal
+
+```bash
+.venv/bin/fredtux                  # neue Sitzung
+.venv/bin/fredtux --session <ID>   # bestehende Sitzung fortsetzen
+```
+
+Beenden mit `/exit`, `/quit`, Strg+C oder Strg+D. Im Dialog: `/help`,
+`/sessions`, `/session <ID>`, `/new`. `--no-ollama-check` überspringt die
+Vorprüfung, wenn der Modellserver gerade nicht erreichbar ist.
+
+### 2. Als Dienst über systemd
+
+Die Unit liegt im Repo: [`deploy/fredtux-api.service`](deploy/fredtux-api.service).
+Einmalig einrichten:
+
+```bash
+sudo cp deploy/fredtux-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fredtux-api
+```
+
+Danach:
+
+| Aufgabe | Befehl |
+|---|---|
+| starten | `sudo systemctl start fredtux-api` |
+| beenden | `sudo systemctl stop fredtux-api` |
+| neu starten | `sudo systemctl restart fredtux-api` |
+| Zustand | `systemctl status fredtux-api` |
+| Log mitlesen | `tail -F ~/fredtux-logs/api.log` |
+
+Die Unit liest `config.nd` per `EnvironmentFile`. **Änderungen dort wirken erst
+nach einem Neustart** – das ist die häufigste Ursache für „die Einstellung greift
+nicht".
+
+Die mitgelieferte Unit ist auf den Knoten zugeschnitten, auf dem sie entstanden
+ist: `After=/Wants=wg-quick@wg0.service` und der Logpfad
+`/home/bot/fredtux-logs/api.log`. Auf einem anderen Rechner beides anpassen,
+sonst startet der Dienst nicht oder schreibt ins Leere.
+
+### 3. Ohne systemd, in einer abgehängten `screen`-Sitzung
+
+Für Rechner ohne root oder wenn die Unit nicht passt:
+
+```bash
+screen -dmS fredtux bash -lc 'cd ~/fredTux-2-0 && exec .venv/bin/fredtux --serve >> ~/.fredtux-2.0/logs/api.log 2>&1'
+screen -ls                     # läuft sie?
+screen -r fredtux              # mitlesen, mit Strg+A dann D wieder lösen
+screen -S fredtux -X quit      # beenden
+```
+
+Der Vorteil: die Sitzung überlebt das Schließen des Terminals. Der Nachteil: sie
+überlebt **keinen** Reboot – dafür ist die Unit da.
+
+### 4. Anfragen von außen: das CLI-Werkzeug
+
+`fredtux --serve` spricht OpenAI-kompatibel. Damit lässt sich jeder Client
+verbinden, und für die Kommandozeile genügt `curl`:
+
+```bash
+curl -s http://127.0.0.1:8765/health
+curl -s http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"fredtux-2-0","messages":[{"role":"user","content":"Antworte nur mit OK"}]}'
+```
+
+Bequemer ist der Helfer **`~/freebuff/fredtux-curl.sh`** – **nicht Teil dieses
+Repos**, er gehört zur Freebuff-Ablage auf dem Agentenrechner. Er bündelt die
+Handgriffe, die man sonst jedes Mal von Hand tippt, und läuft von dort aus
+gegen jeden Knoten (`--url`) – die Beispiele unten setzen voraus, dass er im
+Suchpfad liegt oder als `~/freebuff/fredtux-curl.sh` aufgerufen wird:
+
+```bash
+fredtux-curl.sh --health                  # nur /health, nichts senden
+fredtux-curl.sh --neu "Frage"             # neue Sitzung, die ID wird angezeigt
+fredtux-curl.sh -s <ID> "noch eine Frage" # Sitzung fortsetzen
+fredtux-curl.sh --neustart                # Dienst neu starten, dann auf /health warten
+fredtux-curl.sh --nur-neustart            # nur neu starten
+fredtux-curl.sh --pruefen                 # sind alle nötigen Programme da?
+```
+
+Einstellungen kommen aus `~/freebuff/fredtux-curl.conf` – gesucht neben dem
+Skript und in `~/freebuff/`, oder ausdrücklich per `--config`:
+`FREDTUX_API_URL`, `FREDTUX_SSH_HOST`, `FREDTUX_SERVICE`,
+`FREDTUX_RESTART_WAIT`, `FREDTUX_MAX_TIME`. Den Neustart macht er lokal per
+`sudo systemctl` oder aus der Ferne per SSH – erkannt wird das selbst,
+`FREDTUX_LOKAL=1` bzw. `0` erzwingt die Wahl.
+
 ## Standardumgebung
 
 Die folgenden Werte sind die eingebauten Fallback-Werte. Eine vorhandene
@@ -91,8 +185,9 @@ OpenAI-kompatiblen Hub. Es werden keine Anmeldedaten benötigt.
 | `FREDTUX_API_MODEL` | `fredtux-2-0` | Virtueller OpenAPI-Modellname |
 | `FREDTUX_STREAM_LOG` | `1` | `1` schreibt jedem Lauf live mit (`<home>/logs/stream.log`) |
 | `FREDTUX_STREAM_LOG_FILE` | `<FREDTUX_HOME>/logs/stream.log` | Abweichender Pfad des Transparenzprotokolls |
-| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Runden ohne erfolgreichen Werkzeugaufruf, bevor abgebrochen wird |
+| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Runden ohne neuen Werkzeugertrag, bevor abgebrochen wird |
 | `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Harte Obergrenze aller Werkzeugrunden (Endlosschleifenschutz) |
+| `FREDTUX_MAX_REPEAT_CALLS` | `3` | Derselbe Aufruf mit derselben Antwort bricht nach so vielen Wiederholungen ab |
 | `FREDTUX_LOG` | `0` | `1` schaltet das Aktivitätsprotokoll ein |
 | `FREDTUX_LOG_LEVEL` | `info` | `info` protokolliert den Ablauf, `debug` zusätzlich jede HTTP-Zeile |
 | `FREDTUX_LOG_FILE` | `<FREDTUX_HOME>/logs/fredtux.jsonl` | Abweichender Pfad des Aktivitätsprotokolls |
@@ -156,6 +251,7 @@ FREDTUX_API_PORT=8765
 FREDTUX_API_MODEL=fredtux-2-0
 FREDTUX_MAX_IDLE_ROUNDS=6
 FREDTUX_MAX_TOTAL_ROUNDS=40
+FREDTUX_MAX_REPEAT_CALLS=3
 ```
 
 `127.0.0.1:8000` ist kein direkter Ollama-Port, deshalb wird der native
@@ -285,6 +381,24 @@ werden mit HTTP 400 abgewiesen.
 
 Die Antwort enthält zusätzlich `fredtux_session_id`. Für das Fortsetzen kann dieselbe
 ID als JSON-Feld `session_id` oder als Header `X-FredTux-Session-ID` gesendet werden.
+
+### Steuerbefehle `screen:` – ohne Modell
+
+Eine Nachricht, die mit `screen:` beginnt, wird **vor** dem Lauf abgefangen: sie
+erreicht das Modell nicht und belegt keinen Laufplatz. Damit lassen sich Sitzungen
+in jedem Client verwalten, der einfach Text schickt (curl, OpenWebUI, Ollama-App).
+
+| Eingabe | Wirkung |
+|---|---|
+| `screen:-ls` | was gerade rechnet, und die letzten Sitzungen |
+| `screen:-r [Sitzung]` | an einen Lauf hängen und auf das Ergebnis warten |
+| `screen:-a` | an den gerade laufenden Lauf hängen (ohne ID) |
+| `screen:-d` | Zustand der eigenen Sitzung samt Erklärung |
+| `screen:-new` | neue Sitzung beginnen, der alte Verlauf bleibt als Datei liegen |
+| `screen:-rm <Sitzung> …` | abgeschlossene Sitzungen löschen (nicht die eigene, nicht laufende) |
+
+Ein Backslash davor (`\screen:-ls`) hebt die Sonderbedeutung auf und schickt den
+Text an das Modell.
 Standardmäßig bindet der Server auf `0.0.0.0:8765` und ist damit im lokalen Netz
 erreichbar. Für einen Zugriff von einem anderen Rechner muss die IP-Adresse dieses
 Rechners verwendet werden, zum Beispiel `http://192.168.x.x:8765/v1`; `0.0.0.0` selbst
@@ -394,8 +508,9 @@ Zwei Grenzen schützen trotzdem vor Endlosschleifen:
 
 | Einstellung | Standard | Wirkung |
 |---|---|---|
-| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Abbruch nach dieser Zahl *aufeinanderfolgender* Runden ohne Fortschritt; jede erfolgreiche Runde setzt den Zähler zurück |
-| `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Harte Obergrenze aller Runden als letztes Sicherheitsnetz |
+| `FREDTUX_MAX_IDLE_ROUNDS` | `6` | Abbruch nach dieser Zahl *aufeinanderfolgender* Runden ohne Fortschritt; jede Runde mit einem Werkzeugertrag, der noch nicht im Kontext stand, setzt den Zähler zurück |
+| `FREDTUX_MAX_TOTAL_ROUNDS` | `40` | Harte Obergrenze aller Runden als letztes Sicherheitsnetz; bei schnellen Modellen darf sie deutlich höher stehen, weil Schleifen schon vorher an der Leerlauf- und der Wiederholungsgrenze enden |
+| `FREDTUX_MAX_REPEAT_CALLS` | `3` | Ein Werkzeug, das mit denselben Parametern hintereinander dieselbe Antwort liefert, gilt nicht als Fortschritt; beim Erreichen dieser Zahl bricht der Lauf mit einer Meldung ab |
 
 Wiederholte Fehlschläge fangen zusätzlich `_tool_loop_error`: der zweite Aufruf
 desselben Werkzeugs mit denselben fehlgeschlagenen Parametern oder drei
@@ -664,7 +779,7 @@ git diff --check
 ```
 
 Danach den Quellstand nach `main` auf GitHub pushen und die Version aus
-`pyproject.toml` (aktuell `0.6.0`) als Release veröffentlichen. Keine Secrets,
+`pyproject.toml` (aktuell `0.5.0`) als Release veröffentlichen. Keine Secrets,
 `.venv`-Inhalte oder privaten `~/.fredtux-2.0`-Daten committen.
 
 ## Lizenz

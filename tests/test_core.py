@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,16 @@ class ToolLoopTests(unittest.TestCase):
         self.assertIn("Verbindliche Regeln", prompt)
         self.assertIn("Nach zwei identischen Werkzeugfehlern", prompt)
         self.assertIn("run_coding_command", prompt)
+
+    def test_system_prompt_nennt_arbeits_und_schreibbereich(self):
+        """Ohne die Pfade rät das Modell Schreibziele wie /tmp oder /app."""
+        root = Path(tempfile.mkdtemp())
+        core = make_core(shell_root=root, shell_write_root=root)
+        prompt = core.system_prompt()
+        self.assertIn("Arbeitsverzeichnis", prompt)
+        self.assertIn(str(root), prompt)
+        self.assertIn("Schreiben nur unter", prompt)
+        self.assertIn("list_knowledge", prompt)
 
     def test_ask_stops_after_repeated_tool_failure(self):
         core = self.make_core()
@@ -206,14 +217,20 @@ class ToolLoopBudgetTests(unittest.TestCase):
         self.assertNotIn("Maximale Anzahl", "".join(chunks))
 
     def test_endless_successful_tool_calls_stop_at_total_round_limit(self):
-        core = make_core(llm=EndlessToolLLM(), tool_result="Inhalt", max_total_rounds=5, max_idle_rounds=99)
+        core = make_core(
+            llm=EndlessToolLLM(), tool_result="Inhalt",
+            max_total_rounds=5, max_idle_rounds=99, max_repeat_calls=99,
+        )
         result = core.ask("Endlosschleife.")
         self.assertIn("Maximale Anzahl von Werkzeugschleifen erreicht", result)
         self.assertIn("Runden gesamt=5", result)
         self.assertIn("list_files", result)
 
     def test_stream_endless_successful_tool_calls_stop_at_total_round_limit(self):
-        core = make_core(llm=EndlessToolLLM(), tool_result="Inhalt", max_total_rounds=4, max_idle_rounds=99)
+        core = make_core(
+            llm=EndlessToolLLM(), tool_result="Inhalt",
+            max_total_rounds=4, max_idle_rounds=99, max_repeat_calls=99,
+        )
         result = "".join(core.ask_stream("Endlosschleife."))
         self.assertIn("Maximale Anzahl von Werkzeugschleifen erreicht", result)
         self.assertIn("Runden gesamt=4", result)
@@ -253,18 +270,100 @@ class ToolLoopBudgetTests(unittest.TestCase):
         self.assertEqual(core.llm.calls, 3)
 
     def test_progress_resets_idle_counter(self):
-        core = make_core(llm=EndlessToolLLM(), tool_result="Inhalt", max_total_rounds=8, max_idle_rounds=1)
+        core = make_core(
+            llm=ManyToolRoundsLLM(99), tool_result="Datei geschrieben.",
+            max_total_rounds=8, max_idle_rounds=1,
+        )
         result = core.ask("Viele Runden mit Fortschritt.")
         self.assertIn("Runden gesamt=8", result)
         self.assertIn("Runden ohne Fortschritt=0", result)
         self.assertEqual(core.llm.calls, 8)
 
     def test_loop_diagnostics_are_logged(self):
-        core = make_core(llm=EndlessToolLLM(), tool_result="Inhalt", max_total_rounds=3, max_idle_rounds=99)
+        core = make_core(
+            llm=EndlessToolLLM(), tool_result="Inhalt",
+            max_total_rounds=3, max_idle_rounds=99, max_repeat_calls=99,
+        )
         core.ask("Endlosschleife.")
         records = [line for line in core.config.error_log_path.read_text(encoding="utf-8").splitlines() if line]
         self.assertIn('"category":"tool_loop"', records[-1])
         self.assertIn("Runden gesamt=3", records[-1])
+
+
+class SameFileLLM:
+    """Liest immer wieder dieselbe Datei – erfolgreich, aber ohne neue Information."""
+
+    def __init__(self, result="Inhalt der Datei", max_calls=99):
+        self.calls = 0
+        self.result = result
+        self.max_calls = max_calls
+
+    def _reply(self):
+        self.calls += 1
+        if self.calls > self.max_calls:
+            return {"content": "Fertig.", "tool_calls": []}
+        return {
+            "content": "",
+            "tool_calls": [{
+                "id": f"call-{self.calls}",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"NOTIZEN.md"}'},
+            }],
+        }
+
+    def chat(self, history, schemas):
+        return self._reply()
+
+    def chat_stream(self, history, schemas):
+        yield {"type": "complete", "content": "", "tool_calls": self._reply()["tool_calls"]}
+
+
+class RepeatGuardTests(unittest.TestCase):
+    """Gleicher Aufruf, gleiche Antwort: kein Fortschritt, sondern eine Schleife."""
+
+    def test_dreimal_dieselbe_antwort_bricht_ab(self):
+        core = make_core(llm=SameFileLLM(), tool_result="Inhalt der Datei")
+        result = core.ask("Lies die Notizen.")
+        self.assertIn("FEHLER", result)
+        self.assertIn("dreht sich im Kreis", result)
+        self.assertIn("read_file", result)
+        self.assertEqual(core.llm.calls, 3)
+        self.assertNotIn("Maximale Anzahl", result)
+
+    def test_stream_bricht_ebenfalls_ab(self):
+        core = make_core(llm=SameFileLLM(), tool_result="Inhalt der Datei")
+        result = "".join(core.ask_stream("Lies die Notizen."))
+        self.assertIn("dreht sich im Kreis", result)
+        self.assertEqual(core.llm.calls, 3)
+
+    def test_grenze_ist_konfigurierbar(self):
+        core = make_core(llm=SameFileLLM(), tool_result="Inhalt der Datei", max_repeat_calls=5)
+        core.ask("Lies die Notizen.")
+        self.assertEqual(core.llm.calls, 5)
+
+    def test_wechselnde_antwort_bleibt_fortschritt(self):
+        antworten = iter([f"Stand {i}" for i in range(1, 20)])
+        core = make_core(
+            llm=SameFileLLM(max_calls=4),
+            tool_result=lambda _name, _args: next(antworten),
+        )
+        self.assertEqual(core.ask("Lies die Notizen."), "Fertig.")
+        self.assertEqual(core.llm.calls, 5)
+
+    def test_wiederholung_zaehlt_als_runde_ohne_fortschritt(self):
+        core = make_core(
+            llm=SameFileLLM(), tool_result="Inhalt der Datei",
+            max_total_rounds=99, max_idle_rounds=2, max_repeat_calls=99,
+        )
+        result = core.ask("Lies die Notizen.")
+        self.assertIn("Runden ohne Fortschritt=2", result)
+        self.assertEqual(core.llm.calls, 3)
+
+    def test_wiederholung_wird_protokolliert(self):
+        core = make_core(llm=SameFileLLM(), tool_result="Inhalt der Datei")
+        core.ask("Lies die Notizen.")
+        records = core.config.error_log_path.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any("ohne neue Information" in line for line in records))
 
 
 class DenkLLM:
@@ -394,6 +493,65 @@ class SystemBriefingTests(unittest.TestCase):
     def test_reload_rules_ohne_aenderung_meldet_unveraendert(self):
         core = self.make_core("Gleicher Stand.\n")
         self.assertIn("unverändert", core.tools.call("reload_rules", "{}"))
+
+
+class ContextWindowTests(unittest.TestCase):
+    """Die Anfrage muss ins Fenster passen, sonst schneidet der Server die Frage weg."""
+
+    def make_core(self, context_limit=4000, **overrides):
+        root = Path(tempfile.mkdtemp())
+        config = Config(
+            home=root,
+            base_url="http://unused/v1",
+            model="fake",
+            api_key=None,
+            context_limit=context_limit,
+            **overrides,
+        )
+        core = AgentCore(config, session_id="context-test")
+        core.history = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF?"},
+        ]
+        return core
+
+    def test_tool_response_gilt_nicht_als_frage(self):
+        """Die Vorlage ueberspringt user-Nachrichten, die nur Werkzeugantwort sind."""
+        core = self.make_core()
+        core.history = [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "<tool_response>roh</tool_response>"},
+        ]
+        core._ensure_user_query("Was laeuft morgen um 20:15 im ZDF?")
+        self.assertEqual(core.history[-1]["role"], "user")
+        self.assertIn("ZDF", core.history[-1]["content"])
+
+    def test_grosse_werkzeugausgabe_wird_gekuerzt(self):
+        core = self.make_core()
+        core.history += [
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file",
+             "content": "<html>" + "x" * 20000},
+        ]
+        core._prepare_context("Was laeuft morgen um 20:15 im ZDF?")
+        self.assertLessEqual(
+            core.compactor.estimate_tokens(core.history),
+            core.compactor.budget(core._context_overhead()),
+        )
+        self.assertIn("ZDF", core.history[1]["content"])
+
+    def test_kleine_liste_bleibt_unberuehrt(self):
+        core = self.make_core(context_limit=6000)
+        vorher = json.dumps(core.history, ensure_ascii=False)
+        core._prepare_context("Was laeuft morgen um 20:15 im ZDF?")
+        self.assertEqual(json.dumps(core.history, ensure_ascii=False), vorher)
+
+    def test_werkzeugdeklaration_zaehlt_mit(self):
+        core = self.make_core()
+        self.assertGreater(core._context_overhead(), 0)
 
 
 if __name__ == "__main__":

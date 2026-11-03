@@ -42,6 +42,83 @@ class ShellToolsTests(unittest.TestCase):
             tools.write_file("config.nd", "changed")
         self.assertIn("Rechte", tools.change_permissions("notes/test.txt", "0640"))
 
+    def test_binary_output_is_decoded_instead_of_failing(self):
+        """Eine gzip-Antwort darf die Werkzeugrunde nicht abbrechen.
+
+        `curl | head` auf eine komprimierte Antwort lieferte 0x8b an Position 1;
+        mit text=True warf subprocess einen UnicodeDecodeError und die **ganze**
+        Ausgabe war verloren. Im Lauf endete das in der Werkzeugschleife.
+        """
+        _, tools = self.make_tools("yolo", write=True)
+        result = tools.execute_command("printf '\\037\\213abc'")
+        self.assertIn("exit=0", result)
+        self.assertIn("gzip", result)
+
+    def test_plain_utf8_output_has_no_binary_warning(self):
+        _, tools = self.make_tools("yolo", write=True)
+        result = tools.execute_command("printf 'hallo-welt'")
+        self.assertIn("hallo-welt", result)
+        self.assertNotIn("nicht als UTF-8 lesbar", result)
+
+    def test_missing_file_names_similar_files(self):
+        root, tools = self.make_tools("standard", write=False)
+        (root / "zdf-tv-programm-api.md").write_text("x", encoding="utf-8")
+        with self.assertRaises(ShellError) as context:
+            tools.read_file("zdf-programm.md")
+        message = str(context.exception)
+        self.assertIn("nicht gefunden", message)
+        self.assertIn("zdf-tv-programm-api.md", message)
+
+    def test_missing_file_points_to_listing_when_nothing_is_similar(self):
+        _, tools = self.make_tools("standard", write=False)
+        with self.assertRaises(ShellError) as context:
+            tools.read_file("gibtsnicht.md")
+        self.assertIn("list_knowledge", str(context.exception))
+
+    def test_read_file_reaches_the_knowledge_directory(self):
+        """Die eigenen Wissensdateien müssen lesbar sein.
+
+        Sie liegen außerhalb des Arbeitsverzeichnisses. Ohne diesen Bereich ist
+        read_file genau auf die Dateien verboten, die list_knowledge anbietet –
+        das Modell lief dadurch in drei Fehlschläge hintereinander.
+        """
+        root = Path(tempfile.mkdtemp())
+        home = Path(tempfile.mkdtemp())
+        tools = ShellTools(
+            Config(
+                home=home,
+                base_url="http://unused/v1",
+                model="fake",
+                api_key=None,
+                shell_mode="standard",
+                shell_root=root,
+                shell_write_root=root,
+            )
+        )
+        rag = home / "data" / "brain" / "rag"
+        rag.mkdir(parents=True)
+        (rag / "notiz.md").write_text("wissen", encoding="utf-8")
+        self.assertIn("wissen", tools.read_file(str(rag / "notiz.md")))
+
+        (home / "geheim.txt").write_text("nein", encoding="utf-8")
+        with self.assertRaises(ShellError) as context:
+            tools.read_file(str(home / "geheim.txt"))
+        self.assertIn("Lesbar sind", str(context.exception))
+
+    def test_write_error_names_the_allowed_directory(self):
+        root, tools = self.make_tools("coding", write=True)
+        with self.assertRaises(ShellError) as context:
+            tools.run_structured_command(
+                [{
+                    "program": "python3",
+                    "args": ["-c", "print('x')"],
+                    "redirect_stdout": "/tmp/ausserhalb.txt",
+                }]
+            )
+        message = str(context.exception)
+        self.assertIn("Schreibbar", message)
+        self.assertIn(str(root), message)
+
     def test_yolo_mode_runs_bash_pipeline(self):
         _, tools = self.make_tools("yolo", write=True)
         result = tools.execute_command("printf yolo-ok")
@@ -144,6 +221,26 @@ class ShellToolsTests(unittest.TestCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "backup-output\n")
         with self.assertRaises(ShellError):
             tools.execute_command(f"touch {backup_root}/outside-roots.txt")
+
+
+class CodingProgrammTests(unittest.TestCase):
+    """Der Coding-Modus braucht lynx, sonst ist eine Programmvorschau nicht lesbar."""
+
+    def test_lynx_ist_freigegeben(self):
+        from fredtux.tools.shell import CODING_COMMANDS
+
+        self.assertIn("lynx", CODING_COMMANDS)
+
+    def test_ohne_freigabe_wird_lynx_abgelehnt(self):
+        from fredtux.tools.coding import CodingCommandError, StructuredCommandRunner
+
+        root = Path(tempfile.mkdtemp())
+        config = Config(home=root, base_url="http://unused/v1", model="fake", api_key=None,
+                        shell_mode="coding", shell_root=root, shell_write_root=root)
+        tools = ShellTools(config)
+        runner = StructuredCommandRunner(tools, {"curl"}, 5)
+        with self.assertRaises(CodingCommandError):
+            runner.run([{"program": "lynx", "args": ["-dump", "https://example.invalid"]}])
 
 
 if __name__ == "__main__":

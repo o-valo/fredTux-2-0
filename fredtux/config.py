@@ -34,6 +34,7 @@ class Config:
     coding_timeout: float = 300.0
     max_idle_rounds: int = 6
     max_total_rounds: int = 40
+    max_repeat_calls: int = 3
     num_ctx: int = 0
     max_tool_output: int = 8000
     context_limit: int = 24000
@@ -83,6 +84,7 @@ class Config:
             coding_timeout=float(get("FREDTUX_CODING_TIMEOUT", "300")),
             max_idle_rounds=max(1, int(get("FREDTUX_MAX_IDLE_ROUNDS", "6"))),
             max_total_rounds=max(1, int(get("FREDTUX_MAX_TOTAL_ROUNDS", "40"))),
+            max_repeat_calls=max(2, int(get("FREDTUX_MAX_REPEAT_CALLS", "3"))),
             num_ctx=max(0, int(get("FREDTUX_NUM_CTX", "0"))),
             max_tool_output=max(200, int(get("FREDTUX_MAX_TOOL_OUTPUT", "8000"))),
             context_limit=max(1000, int(get("FREDTUX_CONTEXT_LIMIT", "24000"))),

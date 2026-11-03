@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -16,6 +17,92 @@ class LLMError(RuntimeError):
 
 
 REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
+
+# Woran ein Fehler der Server-Chat-Vorlage zu erkennen ist. Ollama schickt dann
+# einen Jinja-Abbruch ("While executing CallExpression at line 85 …") statt
+# einer Antwort – für den Benutzer sieht das wie ein kaputtes Modell aus.
+TEMPLATE_MARKERS = ("jinja", "raise_exception", "while executing call", "template")
+
+
+def _unwrap_error(raw: str) -> str:
+    """Packt verschachtelte JSON-Fehlerketten aus, bis nur noch Text übrig ist.
+
+    Ollama und andere Server verpacken die eigentliche Meldung als JSON-String
+    in einem JSON-Feld, teils mehrfach. Ohne dieses Auspacken steht im Klienten
+    ein Zeichensalat statt einer Begründung.
+    """
+    text = raw.strip()
+    for _ in range(4):
+        if not text.startswith(("{", "[")):
+            break
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            break
+        if isinstance(payload, str):
+            text = payload.strip()
+            continue
+        if isinstance(payload, dict):
+            inner = payload.get("error", payload)
+            if isinstance(inner, dict):
+                inner = inner.get("message") or inner.get("error")
+            if isinstance(inner, str) and inner.strip():
+                text = inner.strip()
+                continue
+        break
+    return text
+
+
+def _readable_detail(raw: str, limit: int = 240) -> str:
+    """Macht aus dem Server-Body eine einzige, lesbare Zeile."""
+    text = _unwrap_error(raw)
+    text = text.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"')
+    text = re.sub(r"\s+", " ", text).strip(" -^")
+    if len(text) > limit:
+        text = text[:limit].rstrip() + " …"
+    return text
+
+
+def _template_reason(detail: str) -> str:
+    """Gibt den Kern eines Vorlagenfehlers zurück – oder "", wenn keiner vorliegt."""
+    if not any(marker in detail.lower() for marker in TEMPLATE_MARKERS):
+        return ""
+    for muster in (r"jinja exception\s*:\s*(.+)$", r"error\s*:\s*(.+)$"):
+        treffer = re.search(muster, detail, re.IGNORECASE)
+        if treffer:
+            return treffer.group(1).strip()[:160]
+    return detail[:160]
+
+
+def _error_message(url: str, code: str, raw: str) -> str:
+    """Baut die Fehlermeldung: verständlich, mit Begründung und einem Hinweis."""
+    detail = _readable_detail(raw)
+    if "no user query" in detail.lower():
+        return (
+            f"Der Modellserver hat die Anfrage abgelehnt, bevor er gerechnet hat ({code}): "
+            "in der ihm vorliegenden Nachrichtenliste stand keine Frage von dir mehr.\n"
+            "Grund laut Server: No user query found in messages.\n"
+            "Uebliche Ursache: die Anfrage war groesser als das Context-Fenster des Modells. "
+            "Der Server schneidet dann von vorne ab – und die Frage steht vorne mit drin, "
+            "waehrend die Werkzeugantworten hinten stehen bleiben.\n"
+            "Hilft: neue Sitzung (/new), weniger grosse Werkzeugausgaben oder ein Modell "
+            "mit groesserem Fenster.\n"
+            f"Endpunkt: {url}"
+        )
+    reason = _template_reason(detail)
+    if reason:
+        return (
+            f"Der Modellserver hat die Anfrage abgelehnt, bevor er gerechnet hat ({code}): "
+            f"seine Chat-Vorlage kam mit der Nachrichtenliste nicht zurecht.\n"
+            f"Grund laut Server: {reason}\n"
+            "So etwas liegt am Gesprächsverlauf, nicht am Modell – eine neue Sitzung (/new) "
+            "räumt ihn auf. Tritt es sofort wieder auf, stimmt die Reihenfolge der Nachrichten "
+            "(Systemnachricht zuerst, Werkzeugantworten direkt hinter ihrem Aufruf).\n"
+            f"Endpunkt: {url}"
+        )
+    if detail:
+        return f"LLM-Endpunkt {url} antwortete mit {code}: {detail}"
+    return f"LLM-Endpunkt {url} antwortete mit {code} (ohne Begründung)."
 
 
 def _reasoning_of(message: dict[str, Any]) -> str:
@@ -236,7 +323,9 @@ class LLMClient:
                         break
                     event = json.loads(data)
                     if "error" in event:
-                        raise LLMError(f"Upstream-Streaming-Fehler: {event['error']}")
+                        raise LLMError(
+                            _error_message(url, "Fehler im Datenstrom", str(event["error"]))
+                        )
                     choices = event.get("choices", [])
                     if not choices:
                         continue
@@ -285,16 +374,15 @@ class LLMClient:
         return {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
 
     def _http_message(self, url: str, exc: urllib.error.HTTPError) -> str:
-        return f"LLM-Endpunkt {url} antwortete mit HTTP {exc.code}{self._http_detail(exc)}"
+        return _error_message(url, f"HTTP {exc.code}", self._http_body(exc))
 
     @staticmethod
-    def _http_detail(exc: urllib.error.HTTPError) -> str:
-        """Hängt die Fehlermeldung des Servers an (z. B. Ollamas 'model not found')."""
+    def _http_body(exc: urllib.error.HTTPError) -> str:
+        """Liest die Fehlermeldung des Servers vollständig aus (z. B. Ollamas Jinja-Abbruch)."""
         try:
-            body = exc.read().decode("utf-8", "replace").strip()
+            return exc.read().decode("utf-8", "replace")
         except Exception:  # Der Body ist nur eine Zugabe, nie ein Abbruchgrund.
             return ""
-        return f": {body[:200]}" if body else ""
 
     def _timeout_message(self, url: str, timeout: float) -> str:
         return (

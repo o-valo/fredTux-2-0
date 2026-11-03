@@ -69,6 +69,57 @@ class LLMErrorMessageTests(unittest.TestCase):
         self.assertIn("not found", message)
 
     @patch("fredtux.llm.urllib.request.urlopen")
+    def test_http_500_template_error_is_explained(self, urlopen):
+        """Ollamas Jinja-Abbruch darf nicht roh im Klienten landen."""
+        body = (
+            b'{"error":{"message":"{\\"error\\":{\\"code\\":500,\\"message\\":\\"'
+            b'\\\\n------------\\\\nWhile executing CallExpression at line 85, column 32 '
+            b'in source:\\\\n...first %}\\\\nError: Jinja Exception: System message must be '
+            b'at the beginning.\\"}}"}'
+        )
+        error = urllib.error.HTTPError(
+            "http://host/v1/chat/completions", 500, "Internal Server Error", {}, None
+        )
+        error.read = lambda: body
+        urlopen.side_effect = error
+        with self.assertRaises(LLMError) as context:
+            self.make_client().chat([{"role": "user", "content": "Hallo"}])
+        message = str(context.exception)
+        self.assertIn("HTTP 500", message)
+        self.assertIn("Chat-Vorlage", message)
+        self.assertIn("System message must be at the beginning", message)
+        self.assertIn("/new", message)
+        self.assertNotIn("\\n", message)
+        self.assertNotIn("CallExpression at line", message.split("Grund laut Server:")[0])
+
+    @patch("fredtux.llm.urllib.request.urlopen")
+    def test_http_500_missing_user_query_is_explained(self, urlopen):
+        """Fehlt die Benutzerfrage, muss die Meldung das benennen."""
+        body = (
+            b'{"error":{"message":"{\\"error\\":{\\"code\\":500,\\"message\\":\\"'
+            b'\\\\n------------\\\\nWhile executing CallExpression at line 79, column 24 '
+            b'in source:\\\\n...lti_step_tool %}\\\\nError: Jinja Exception: No user query '
+            b'found in messages.\\"}}"}'
+        )
+        error = urllib.error.HTTPError(
+            "http://host/v1/chat/completions", 500, "Internal Server Error", {}, None
+        )
+        error.read = lambda: body
+        urlopen.side_effect = error
+        with self.assertRaises(LLMError) as context:
+            self.make_client().chat([{"role": "user", "content": "Hallo"}])
+        message = str(context.exception)
+        self.assertIn("HTTP 500", message)
+        self.assertIn("keine Frage von dir mehr", message)
+        self.assertIn("No user query found in messages", message)
+        # Die Ursache ist der Ueberlauf des Fensters, nicht die Verdichtung:
+        # der Server schneidet von vorne ab, und die Frage steht vorne.
+        self.assertIn("Context-Fenster", message)
+        self.assertIn("/new", message)
+        self.assertNotIn("\\n", message)
+        self.assertNotIn("CallExpression at line", message)
+
+    @patch("fredtux.llm.urllib.request.urlopen")
     def test_chat_reports_broken_answer_with_endpoint(self, urlopen):
         urlopen.return_value = FakeResponse({"unexpected": True})
         with self.assertRaisesRegex(LLMError, r"Ungültige Antwort von .*/chat/completions"):

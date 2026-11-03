@@ -98,5 +98,23 @@ class SessionStore:
             messages.append({"role": current_role, "content": "\n".join(chunks).strip()})
         return [message for message in messages if message["content"]]
 
+    def remove(self, session_id: str) -> list[Path]:
+        """Löscht eine Sitzung samt Sidecar.
+
+        Rückgabe sind die entfernten Dateien; eine leere Liste heißt, dass es
+        diese Sitzung nicht (mehr) gab. Eine ungültige ID wirft ``ValueError`` –
+        gelöscht wird nur, was als Sitzungsdatei hier liegen kann.
+        """
+        path = self.path(session_id)
+        if not path.is_file():
+            return []
+        entfernt: list[Path] = []
+        with self._lock(session_id, exclusive=True):
+            for datei in (path, self._sidecar_path(session_id)):
+                if datei.is_file():
+                    datei.unlink()
+                    entfernt.append(datei)
+        return entfernt
+
     def list_sessions(self) -> list[str]:
         return sorted(path.stem for path in self.directory.glob("*.md"))
