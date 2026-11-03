@@ -553,6 +553,33 @@ class ContextWindowTests(unittest.TestCase):
         core = self.make_core()
         self.assertGreater(core._context_overhead(), 0)
 
+    def test_fenster_kleiner_als_systemprompt_wird_gemeldet(self):
+        """Ein Budget unter der Systemprompt-Groesse macht jeden Lauf zur Schleife.
+
+        Auf .125 standen 1495 Tokens Budget gegen 6759 Zeichen Regelwerk: jede
+        Runde verlor ihre Werkzeugantwort, das Modell begann 31-mal von vorn.
+        """
+        core = self.make_core(context_limit=1000)
+        core.history = [
+            {"role": "system", "content": "Regelwerk. " * 1500},
+            {"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF?"},
+        ]
+        core._prepare_context("Was laeuft morgen um 20:15 im ZDF?")
+        protokoll = core.config.error_log_path.read_text(encoding="utf-8")
+        self.assertIn("FREDTUX_CONTEXT_LIMIT", protokoll)
+        self.assertIn("Budget von", protokoll)
+
+    def test_meldung_kommt_nur_einmal(self):
+        core = self.make_core(context_limit=1000)
+        core.history = [
+            {"role": "system", "content": "Regelwerk. " * 1500},
+            {"role": "user", "content": "Was laeuft morgen um 20:15 im ZDF?"},
+        ]
+        core._prepare_context("Was laeuft morgen um 20:15 im ZDF?")
+        core._prepare_context("Was laeuft morgen um 20:15 im ZDF?")
+        protokoll = core.config.error_log_path.read_text(encoding="utf-8")
+        self.assertEqual(protokoll.count("Budget von"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

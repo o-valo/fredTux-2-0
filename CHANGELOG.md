@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project uses semantic versioning.
 
+## [0.6.3] - 2026-11-03
+
+### Fixed
+- **Ein zu kleines Context-Budget wird jetzt gemeldet statt verschwiegen.** Passt
+  der Systemprompt allein nicht ins Budget, kürzt `_fit_context` jede Runde alles
+  außer System und Frage weg – das Modell sieht seine eigene Werkzeugantwort nie
+  und beginnt jede Runde von vorn. Auf `10.7.0.125` waren das 31 Runden
+  `list_knowledge`/`search_knowledge` in 17 Minuten ohne einen Abruf (Budget
+  1495 Tokens gegen ein Regelwerk von 6759 Zeichen). Jetzt steht einmal je Lauf
+  im Transparenzprotokoll, im Chat und im Fehlerprotokoll, wie groß Systemprompt
+  und Werkzeuge sind und welcher Wert in `config.nd` zu klein ist.
+
 ## [0.6.2] - 2026-11-03
 
 ### Fixed

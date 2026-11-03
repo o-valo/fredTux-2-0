@@ -45,6 +45,7 @@ class AgentCore:
             {"type": "object", "properties": {}},
             self.reload_rules,
         )
+        self._context_warning = False
         self.session_id = session_id or datetime.now(timezone.utc).strftime("session-%Y%m%d-%H%M%S")
         self.history = self.sessions.load(self.session_id)
         if not self.history:
@@ -519,21 +520,50 @@ class AgentCore:
             return
         nachrichten = len(self.history)
         gekuerzt, saved = self.compactor.fit_context(self.history, overhead)
-        if saved <= 0 and len(gekuerzt) == nachrichten:
-            return
+        changed = saved > 0 or len(gekuerzt) != nachrichten
         self.history = gekuerzt
         after = self.compactor.estimate_tokens(self.history)
-        entfernt = nachrichten - len(self.history)
-        teile = [f"{saved} Zeichen gekuerzt"] if saved else []
-        if entfernt:
-            teile.append(f"{entfernt} Nachricht(en) aus dem Kontext genommen")
+        if changed:
+            entfernt = nachrichten - len(self.history)
+            teile = [f"{saved} Zeichen gekuerzt"] if saved else []
+            if entfernt:
+                teile.append(f"{entfernt} Nachricht(en) aus dem Kontext genommen")
+            meldung = (
+                f"[Kontext] Fenster gefuellt: {', '.join(teile)}, ca. {before} auf {after} "
+                f"Tokens (Budget {budget}, Werkzeuge {overhead}) – die Frage des Nutzers bleibt"
+            )
+            self.streamlog.line(meldung)
+            if events is not None:
+                events({"type": "reasoning", "content": f"{meldung}\n"})
+            self._trace(meldung)
+            self._log_error("context", meldung)
+        if after > budget:
+            self._warn_context_too_small(budget, overhead, after)
+
+    def _warn_context_too_small(self, budget: int, overhead: int, after: int) -> None:
+        """Meldet ein Fenster, in das nicht einmal der Systemprompt passt.
+
+        Kuerzen kann hier nichts retten: das Regelwerk allein ist groesser als
+        das Budget, also faellt in jeder Runde alles ausser System und Frage
+        weg. Das Modell sieht seine eigene Werkzeugantwort damit nie, haelt
+        jeden Werkzeugaufruf fuer den ersten und wiederholt ihn endlos – auf
+        `10.7.0.125` am 03.11.2026 waren das 31 Runden `list_knowledge` und
+        `search_knowledge` in 17 Minuten ohne einen einzigen Abruf. Ohne diese
+        Meldung sieht so etwas im Protokoll wie ein Modellfehler aus.
+        """
+        if self._context_warning:
+            return
+        self._context_warning = True
+        system_tokens = self.compactor.estimate_tokens(self.history[:1])
         meldung = (
-            f"[Kontext] Fenster gefuellt: {', '.join(teile)}, ca. {before} auf {after} "
-            f"Tokens (Budget {budget}, Werkzeuge {overhead}) – die Frage des Nutzers bleibt"
+            f"[Kontext] Das Budget von {budget} Tokens reicht nicht: der Systemprompt "
+            f"allein braucht ca. {system_tokens} Tokens, die Werkzeugdeklarationen "
+            f"{overhead}. Nach dem Kuerzen stehen {after} Tokens im Fenster – das Modell "
+            "sieht seine Werkzeugantworten nicht mehr und wiederholt seine Runden. "
+            "Abhilfe: FREDTUX_CONTEXT_LIMIT in config.nd groesser als Systemprompt plus "
+            "Werkzeuge setzen (z. B. 7000) und FREDTUX_NUM_CTX passend dazu (z. B. 8192)."
         )
         self.streamlog.line(meldung)
-        if events is not None:
-            events({"type": "reasoning", "content": f"{meldung}\n"})
         self._trace(meldung)
         self._log_error("context", meldung)
 
